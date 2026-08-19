@@ -1,0 +1,19 @@
+{
+  "name": "yalla-delivery-bot",
+  "version": "1.0.0",
+  "description": "Yalla Delivery - WhatsApp interactive delivery bot built with Baileys",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "express": "^4.19.2",
+    "pino": "^9.5.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
