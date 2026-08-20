@@ -42,8 +42,8 @@ const APP_IOS_URL = process.env.APP_IOS_URL || 'https://apps.apple.com/app/yalla
 // طريقة الربط: رمز اقتران (Pairing Code) بدل مسح QR.
 // فعّلها بوضع USE_PAIRING_CODE=true ورقم واتساب الأعمال (أرقام فقط بدون + أو مسافات).
 const USE_PAIRING_CODE = String(process.env.USE_PAIRING_CODE || 'true').toLowerCase() === 'true';
-// رقم واتساب الأعمال: +972593456405  (بصيغة دولية بدون علامة +)
-const BUSINESS_NUMBER = (process.env.BUSINESS_NUMBER || '972593456405').replace(/\D/g, '');
+// رقم واتساب الأعمال: +970593456405  (بصيغة دولية بدون علامة +)
+const BUSINESS_NUMBER = (process.env.BUSINESS_NUMBER || '970593456405').replace(/\D/g, '');
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'warn' });
 
