@@ -47,6 +47,10 @@ const BUSINESS_NUMBER = (process.env.BUSINESS_NUMBER || '972593456405').replace(
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'warn' });
 
+// حواجز أمان: لا يتوقف البوت بسبب خطأ عابر
+process.on('uncaughtException', (e) => console.error('⚠️ خطأ غير متوقع:', e?.message || e));
+process.on('unhandledRejection', (e) => console.error('⚠️ وعد مرفوض:', e?.message || e));
+
 let latestQR = null;
 let connectionStatus = 'disconnected';
 
@@ -452,7 +456,14 @@ async function startBot() {
   });
   currentSock = sock;
 
-  sock.ev.on('creds.update', saveCreds);
+  // حفظ الاعتماد مع حماية من الانهيار لو حُذف المجلد أثناء الكتابة
+  sock.ev.on('creds.update', async () => {
+    try {
+      await saveCreds();
+    } catch (e) {
+      /* المجلد قد يكون حُذف أثناء تنظيف جلسة غير صالحة — نتجاهل بأمان */
+    }
+  });
 
   // الربط برمز اقتران (Pairing Code) لرقم الأعمال — يُطلب مرة واحدة ويبقى ثابتاً
   if (usePairing && !pairingRequested) {
@@ -500,11 +511,18 @@ async function startBot() {
       console.log(`⚠️ انقطع الاتصال (code: ${statusCode}).`);
 
       if (statusCode === DisconnectReason.loggedOut) {
-        // الجلسة أصبحت غير صالحة: ننظّفها ونعيد طلب رمز جديد
-        console.log('🚪 تم تسجيل الخروج / جلسة غير صالحة.');
-        clearAuth();
-        pairingRequested = false;
-        scheduleReconnect(5000);
+        // الجلسة غير صالحة أو رفض من واتساب — أوقف الحلقة لتجنّب الحظر بسبب التكرار
+        console.log('🚪 تم تسجيل الخروج / رفض واتساب الاتصال (401).');
+        // أغلق الاتصال الحالي أولاً ثم نظّف الجلسة بأمان
+        try { sock.ev.removeAllListeners(); sock.end(); } catch (_) {}
+        currentSock = null;
+        setTimeout(() => {
+          clearAuth();
+          console.log('\n⛔ لن تتم إعادة المحاولة تلقائياً لتجنّب حظر واتساب المؤقت.');
+          console.log('⏳ انتظر 15–30 دقيقة، ثم شغّل من جديد:  npm start');
+          console.log('   (السبب المرجّح: محاولات ربط كثيرة سابقة → تهدئة مؤقتة من واتساب.)\n');
+          process.exit(0);
+        }, 500);
       } else if (statusCode === DisconnectReason.restartRequired) {
         // مطلوب إعادة تشغيل الاتصال (طبيعي بعد الربط) — فوري
         scheduleReconnect(1000);
