@@ -58,6 +58,8 @@ let connectionStatus = 'disconnected';
 let currentSock = null;
 let reconnectScheduled = false;
 let pairingRequested = false;
+let pairingAttempts = 0;
+const MAX_PAIRING_ATTEMPTS = 3; // عدد محاولات الاقتران قبل التوقف وطلب الانتظار
 
 // جدولة إعادة اتصال واحدة فقط (لا تتراكم)
 function scheduleReconnect(delayMs = 5000) {
@@ -465,22 +467,22 @@ async function startBot() {
     }
   });
 
-  // الربط برمز اقتران (Pairing Code) لرقم الأعمال — يُطلب مرة واحدة ويبقى ثابتاً
+  // الربط برمز اقتران (Pairing Code) — يُطلب رمز جديد لكل محاولة اتصال غير مربوطة
   if (usePairing && !pairingRequested) {
     pairingRequested = true;
+    pairingAttempts += 1;
     setTimeout(async () => {
       try {
         const code = await sock.requestPairingCode(BUSINESS_NUMBER);
         const pretty = code?.match(/.{1,4}/g)?.join('-') || code;
         console.log('\n============================================');
-        console.log(`🔑 رمز اقتران واتساب الأعمال (${BUSINESS_NUMBER}):`);
+        console.log(`🔑 رمز اقتران واتساب (${BUSINESS_NUMBER}) — محاولة ${pairingAttempts}/${MAX_PAIRING_ATTEMPTS}:`);
         console.log(`   >>>  ${pretty}  <<<`);
-        console.log('⏱️ أدخله خلال دقيقتين من هاتف رقم الأعمال:');
+        console.log('⏱️ أدخله بسرعة (خلال ~دقيقة) من الهاتف:');
         console.log('   واتساب ← الأجهزة المرتبطة ← ربط جهاز');
         console.log('   ← ربط برقم الهاتف بدلاً من ذلك ← أدخل الرمز أعلاه.');
         console.log('============================================\n');
       } catch (e) {
-        pairingRequested = false;
         console.error('⚠️ فشل توليد رمز الاقتران:', e.message);
       }
     }, 4000);
@@ -507,28 +509,47 @@ async function startBot() {
     if (connection === 'close') {
       connectionStatus = 'disconnected';
       const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const alreadyRegistered = sock.authState?.creds?.registered;
 
       console.log(`⚠️ انقطع الاتصال (code: ${statusCode}).`);
 
-      if (statusCode === DisconnectReason.loggedOut) {
-        // الجلسة غير صالحة أو رفض من واتساب — أوقف الحلقة لتجنّب الحظر بسبب التكرار
-        console.log('🚪 تم تسجيل الخروج / رفض واتساب الاتصال (401).');
-        // أغلق الاتصال الحالي أولاً ثم نظّف الجلسة بأمان
-        try { sock.ev.removeAllListeners(); sock.end(); } catch (_) {}
-        currentSock = null;
+      // أغلق الاتصال الحالي دائماً قبل أي إعادة (يمنع التوازي)
+      try { sock.ev.removeAllListeners(); sock.end(); } catch (_) {}
+      currentSock = null;
+
+      if (statusCode === DisconnectReason.restartRequired) {
+        // طبيعي بعد إدخال رمز الاقتران بنجاح — أعد الاتصال فوراً
+        scheduleReconnect(1000);
+        return;
+      }
+
+      // حالة جلسة مربوطة سابقاً ثم سُجّل خروجها فعلياً
+      if (statusCode === DisconnectReason.loggedOut && alreadyRegistered) {
+        console.log('🚪 تم تسجيل الخروج من الجهاز المرتبط.');
         setTimeout(() => {
           clearAuth();
-          console.log('\n⛔ لن تتم إعادة المحاولة تلقائياً لتجنّب حظر واتساب المؤقت.');
-          console.log('⏳ انتظر 15–30 دقيقة، ثم شغّل من جديد:  npm start');
-          console.log('   (السبب المرجّح: محاولات ربط كثيرة سابقة → تهدئة مؤقتة من واتساب.)\n');
+          console.log('⛔ يلزم ربط جديد. شغّل من جديد:  npm start');
           process.exit(0);
         }, 500);
-      } else if (statusCode === DisconnectReason.restartRequired) {
-        // مطلوب إعادة تشغيل الاتصال (طبيعي بعد الربط) — فوري
-        scheduleReconnect(1000);
-      } else {
-        scheduleReconnect(5000);
+        return;
       }
+
+      // ما زلنا في مرحلة الربط (لم يُربط بعد) — أعد طلب رمز جديد ضمن حد المحاولات
+      if (!alreadyRegistered) {
+        if (pairingAttempts >= MAX_PAIRING_ATTEMPTS) {
+          console.log(`\n⛔ فشل الربط بعد ${MAX_PAIRING_ATTEMPTS} محاولات.`);
+          console.log('⏳ الأرجح تهدئة مؤقتة من واتساب. انتظر 30–60 دقيقة ثم: npm start');
+          console.log('   وتأكد أنك تُدخل الرمز بسرعة فور ظهوره.\n');
+          setTimeout(() => { clearAuth(); process.exit(0); }, 500);
+          return;
+        }
+        pairingRequested = false; // اسمح بطلب رمز جديد للمحاولة القادمة
+        scheduleReconnect(5000);
+        return;
+      }
+
+      // أي انقطاع عابر بعد الربط — أعد الاتصال
+      scheduleReconnect(5000);
     }
   });
 
@@ -612,7 +633,14 @@ app.get('/orders', (_req, res) => {
 });
 
 const HOST = process.env.HOST || '0.0.0.0';
-app.listen(PORT, HOST, () => {
-  console.log(`🌐 السيرفر يعمل على ${HOST}:${PORT}`);
-  startBot().catch((err) => console.error('فشل تشغيل البوت:', err));
-});
+
+// لا نشغّل السيرفر/الاتصال إلا عند التشغيل المباشر (وليس عند الاستيراد للاختبار)
+if (require.main === module) {
+  app.listen(PORT, HOST, () => {
+    console.log(`🌐 السيرفر يعمل على ${HOST}:${PORT}`);
+    startBot().catch((err) => console.error('فشل تشغيل البوت:', err));
+  });
+}
+
+// تصدير منطق المحادثة لاختباره محلياً بلا واتساب (test-flow.js)
+module.exports = { handleMessage, resetSession, STATES };
