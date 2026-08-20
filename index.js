@@ -50,6 +50,32 @@ const logger = pino({ level: process.env.LOG_LEVEL || 'warn' });
 let latestQR = null;
 let connectionStatus = 'disconnected';
 
+// حرّاس لمنع الاتصالات المتوازية وتكرار طلب رمز الاقتران
+let currentSock = null;
+let reconnectScheduled = false;
+let pairingRequested = false;
+
+// جدولة إعادة اتصال واحدة فقط (لا تتراكم)
+function scheduleReconnect(delayMs = 5000) {
+  if (reconnectScheduled) return;
+  reconnectScheduled = true;
+  console.log(`🔄 إعادة الاتصال بعد ${delayMs / 1000} ثانية...`);
+  setTimeout(() => {
+    reconnectScheduled = false;
+    startBot().catch((e) => console.error('فشل إعادة الاتصال:', e.message));
+  }, delayMs);
+}
+
+// حذف جلسة فاسدة عند تسجيل الخروج (تُعاد توليدها عند الربط من جديد)
+function clearAuth() {
+  try {
+    fs.rmSync(AUTH_FOLDER, { recursive: true, force: true });
+    console.log('🧹 تم حذف الجلسة القديمة، سيُطلب رمز اقتران جديد.');
+  } catch (e) {
+    console.error('تعذّر حذف مجلد الجلسة:', e.message);
+  }
+}
+
 // ==========================================================
 //  آلة الحالات (State Machine) لكل مستخدم
 // ==========================================================
@@ -400,25 +426,37 @@ function extractText(msg) {
 //  اتصال WhatsApp (Baileys)
 // ==========================================================
 async function startBot() {
+  // إغلاق أي اتصال قديم قبل فتح واحد جديد (يمنع الاتصالات المتوازية)
+  if (currentSock) {
+    try { currentSock.ev.removeAllListeners(); currentSock.end(); } catch (_) {}
+    currentSock = null;
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_FOLDER);
   const { version } = await fetchLatestBaileysVersion();
+  const usePairing = USE_PAIRING_CODE && !state.creds.registered;
 
   const sock = makeWASocket({
     version,
     logger,
     printQRInTerminal: false,
+    // أثناء الربط برمز الاقتران نُعطّل QR حتى لا يتنافس الأسلوبان
+    qrTimeout: usePairing ? undefined : 60000,
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
-    browser: ['Yalla Delivery', 'Chrome', '1.0.0'],
+    browser: ['Yalla Delivery', 'Chrome', '120.0.0'],
     markOnlineOnConnect: false,
+    keepAliveIntervalMs: 30000,
   });
+  currentSock = sock;
 
   sock.ev.on('creds.update', saveCreds);
 
-  // الربط برمز اقتران (Pairing Code) لرقم الأعمال — بديل مسح QR
-  if (USE_PAIRING_CODE && !sock.authState.creds.registered) {
+  // الربط برمز اقتران (Pairing Code) لرقم الأعمال — يُطلب مرة واحدة ويبقى ثابتاً
+  if (usePairing && !pairingRequested) {
+    pairingRequested = true;
     setTimeout(async () => {
       try {
         const code = await sock.requestPairingCode(BUSINESS_NUMBER);
@@ -426,19 +464,21 @@ async function startBot() {
         console.log('\n============================================');
         console.log(`🔑 رمز اقتران واتساب الأعمال (${BUSINESS_NUMBER}):`);
         console.log(`   >>>  ${pretty}  <<<`);
-        console.log('👉 على هاتف رقم الأعمال: واتساب ← الأجهزة المرتبطة ← ربط جهاز');
+        console.log('⏱️ أدخله خلال دقيقتين من هاتف رقم الأعمال:');
+        console.log('   واتساب ← الأجهزة المرتبطة ← ربط جهاز');
         console.log('   ← ربط برقم الهاتف بدلاً من ذلك ← أدخل الرمز أعلاه.');
         console.log('============================================\n');
       } catch (e) {
-        console.error('⚠️ فشل توليد رمز الاقتران:', e.message, '— سيتم استخدام QR بدلاً منه.');
+        pairingRequested = false;
+        console.error('⚠️ فشل توليد رمز الاقتران:', e.message);
       }
-    }, 3000);
+    }, 4000);
   }
 
   sock.ev.on('connection.update', (update) => {
     const { connection, lastDisconnect, qr } = update;
 
-    if (qr) {
+    if (qr && !usePairing) {
       latestQR = qr;
       connectionStatus = 'waiting_qr';
       console.log('\n📱 امسح الـ QR Code التالي من واتساب (الأجهزة المرتبطة):\n');
@@ -449,21 +489,27 @@ async function startBot() {
     if (connection === 'open') {
       latestQR = null;
       connectionStatus = 'connected';
+      pairingRequested = false; // تم الربط بنجاح
       console.log('✅ تم الاتصال بواتساب بنجاح! البوت جاهز لاستقبال الطلبات.');
     }
 
     if (connection === 'close') {
       connectionStatus = 'disconnected';
       const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const loggedOut = statusCode === DisconnectReason.loggedOut;
 
       console.log(`⚠️ انقطع الاتصال (code: ${statusCode}).`);
 
-      if (loggedOut) {
-        console.log('🚪 تم تسجيل الخروج من الجهاز. احذف مجلد الجلسة (' + AUTH_FOLDER + ') ثم أعد التشغيل لمسح QR جديد.');
+      if (statusCode === DisconnectReason.loggedOut) {
+        // الجلسة أصبحت غير صالحة: ننظّفها ونعيد طلب رمز جديد
+        console.log('🚪 تم تسجيل الخروج / جلسة غير صالحة.');
+        clearAuth();
+        pairingRequested = false;
+        scheduleReconnect(5000);
+      } else if (statusCode === DisconnectReason.restartRequired) {
+        // مطلوب إعادة تشغيل الاتصال (طبيعي بعد الربط) — فوري
+        scheduleReconnect(1000);
       } else {
-        console.log('🔄 إعادة الاتصال تلقائياً...');
-        setTimeout(() => startBot().catch((e) => console.error('فشل إعادة الاتصال:', e)), 3000);
+        scheduleReconnect(5000);
       }
     }
   });
