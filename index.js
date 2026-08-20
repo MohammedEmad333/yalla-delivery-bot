@@ -547,7 +547,8 @@ app.get('/orders', (_req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`🌐 السيرفر يعمل على المنفذ ${PORT}`);
+const HOST = process.env.HOST || '0.0.0.0';
+app.listen(PORT, HOST, () => {
+  console.log(`🌐 السيرفر يعمل على ${HOST}:${PORT}`);
   startBot().catch((err) => console.error('فشل تشغيل البوت:', err));
 });
