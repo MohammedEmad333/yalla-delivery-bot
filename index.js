@@ -20,6 +20,7 @@ const qrcodeTerminal = require('qrcode-terminal');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -46,6 +47,14 @@ const CURRENCY = process.env.CURRENCY || '₪';
 const METERS_PER_SHEKEL = 160; // كل هذا القدر من الأمتار = 1 شيكل
 const ROAD_FACTOR = 1.3;        // معامل تعويض انحناء الطرق مقابل الخط المستقيم
 const MIN_FARE = 3;             // أقل أجرة (يمنع سعراً صفرياً داخل الحي نفسه)
+
+// ===== الوقت التقديري (ETA) حسب نوع المركبة — مطابق للتطبيق =====
+const VEHICLE_SPEEDS = { bicycle: 12, motorcycle: 25 }; // كم/ساعة داخل المدينة
+const PREP_MINUTES = 5; // وقت تجهيز/استلام ثابت (دقائق)
+const VEHICLE_TYPES = {
+  1: { key: 'bicycle', label: '🚲 دراجة هوائية' },
+  2: { key: 'motorcycle', label: '🏍️ دراجة نارية' },
+};
 
 // أحياء مدينة غزة — لكل حي إحداثيّة تمثيلية [lng, lat] قرب مركزه (مطابقة للتطبيق)
 const GAZA_NEIGHBORHOODS = [
@@ -121,14 +130,28 @@ const STATES = {
   IDLE: 'IDLE',
   AWAITING_SERVICE: 'AWAITING_SERVICE',
   AWAITING_NAME: 'AWAITING_NAME',
-  AWAITING_SOURCE: 'AWAITING_SOURCE', // المطعم/المتجر أو عنوان الاستلام
-  AWAITING_DETAILS: 'AWAITING_DETAILS', // الأصناف/قائمة الشراء/وصف الطرد
-  AWAITING_PICKUP_HOOD: 'AWAITING_PICKUP_HOOD', // حي الاستلام (لحساب السعر)
-  AWAITING_DROPOFF_HOOD: 'AWAITING_DROPOFF_HOOD', // حي التسليم (لحساب السعر)
-  AWAITING_PHONE: 'AWAITING_PHONE',
+  // نقطة الاستلام (عنوان كامل مطابق للتطبيق)
+  AWAITING_PICKUP_HOOD: 'AWAITING_PICKUP_HOOD',
+  AWAITING_PICKUP_STREET: 'AWAITING_PICKUP_STREET',
+  AWAITING_PICKUP_DETAILS: 'AWAITING_PICKUP_DETAILS',
+  AWAITING_PICKUP_NOTE: 'AWAITING_PICKUP_NOTE',
+  AWAITING_PICKUP_CONTACT_NAME: 'AWAITING_PICKUP_CONTACT_NAME',
+  AWAITING_PICKUP_CONTACT_PHONE: 'AWAITING_PICKUP_CONTACT_PHONE',
+  // نقطة التسليم (عنوان كامل مطابق للتطبيق)
+  AWAITING_DROPOFF_HOOD: 'AWAITING_DROPOFF_HOOD',
+  AWAITING_DROPOFF_STREET: 'AWAITING_DROPOFF_STREET',
+  AWAITING_DROPOFF_DETAILS: 'AWAITING_DROPOFF_DETAILS',
+  AWAITING_DROPOFF_NOTE: 'AWAITING_DROPOFF_NOTE',
+  AWAITING_DROPOFF_CONTACT_NAME: 'AWAITING_DROPOFF_CONTACT_NAME',
+  AWAITING_DROPOFF_CONTACT_PHONE: 'AWAITING_DROPOFF_CONTACT_PHONE',
+  // وصف الشحنة + المركبة
+  AWAITING_PACKAGE_NOTE: 'AWAITING_PACKAGE_NOTE',
+  AWAITING_VEHICLE: 'AWAITING_VEHICLE',
+  // الدفع (نظامنا الحالي: تحويل + إشعار)
   AWAITING_PAYMENT: 'AWAITING_PAYMENT',
-  AWAITING_PAYMENT_PROOF: 'AWAITING_PAYMENT_PROOF', // انتظار إشعار الحوالة
-  AWAITING_TIME: 'AWAITING_TIME',
+  AWAITING_PAYMENT_PROOF: 'AWAITING_PAYMENT_PROOF',
+  // الجدولة (الآن/لاحقاً = scheduledAt)
+  AWAITING_SCHEDULE: 'AWAITING_SCHEDULE',
   CONFIRMATION: 'CONFIRMATION',
 };
 
@@ -241,6 +264,12 @@ const TIME_MENU =
   '2️⃣ وقت محدد لاحقاً\n\n' +
   'اكتب 1 للتوصيل الفوري، أو اكتب الوقت المطلوب مباشرة (مثال: الساعة 8 مساءً).';
 
+const VEHICLE_MENU =
+  'اختر *نوع المركبة* 🛵:\n\n' +
+  '1️⃣ 🚲 دراجة هوائية\n' +
+  '2️⃣ 🏍️ دراجة نارية\n\n' +
+  'اكتب رقم المركبة (1 / 2). يؤثّر على الوقت التقديري فقط.';
+
 // كلمات مفتاحية
 const GREETING_KEYWORDS = ['مرحبا', 'مرحباً', 'السلام عليكم', 'اهلا', 'أهلا', 'هلا', 'hi', 'hello', 'start', 'بدء', 'القائمة', 'menu'];
 const NEW_ORDER_KEYWORDS = ['طلب', 'طلب جديد', 'توصيل'];
@@ -305,6 +334,19 @@ function quote(pickupCoords, dropoffCoords) {
   return { distanceKm, price };
 }
 
+// الوقت التقديري بالدقائق من المسافة ونوع المركبة — مطابق للتطبيق
+function estimateEtaMinutes(distanceKm, vehicleKey = 'motorcycle') {
+  const speed = VEHICLE_SPEEDS[vehicleKey] || VEHICLE_SPEEDS.motorcycle;
+  const d = Number(distanceKm) || 0;
+  const travelMinutes = (d / speed) * 60;
+  return Math.max(1, Math.round(travelMinutes + PREP_MINUTES));
+}
+
+// رمز تسليم عشوائي من 4 أرقام (Card 20) — يُعطى لصاحب الطلب لتأكيد الاستلام
+function generateDeliveryCode() {
+  return String(crypto.randomInt(0, 10000)).padStart(4, '0');
+}
+
 // ==========================================================
 //  حفظ الطلب محلياً في ملف orders.json (بوت مستقل)
 // ==========================================================
@@ -335,21 +377,42 @@ function saveOrder(order) {
 // ==========================================================
 //  منطق المحادثة
 // ==========================================================
-function buildSummary(order) {
+function fmtLocation(loc) {
+  const parts = [loc.neighborhood, loc.street, loc.details].filter(Boolean).join('، ');
+  let s = parts;
+  if (loc.note) s += `\n   📝 ملاحظة: ${loc.note}`;
+  s += `\n   👤 ${loc.contactName} — ${loc.contactPhone}`;
+  return s;
+}
+
+function buildSummary(o) {
   return (
     '📋 *ملخص طلبك:*\n\n' +
-    `🔧 الخدمة: ${order.serviceLabel}\n` +
-    `👤 الاسم: ${order.customerName}\n` +
-    `🏬 المصدر: ${order.source}\n` +
-    `📝 التفاصيل: ${order.details}\n` +
-    `📍 الاستلام: ${order.pickupHood}  ←  🎯 التسليم: ${order.dropoffHood}\n` +
-    `🚗 المسافة التقريبية: ${order.distanceKm} كم\n` +
-    `💵 سعر التوصيل التقريبي: ${order.deliveryPrice} ${CURRENCY}\n` +
-    `📱 جوال التواصل: ${order.contactPhone}\n` +
-    `💳 الدفع: ${order.paymentMethod}\n` +
-    `⏰ وقت التوصيل: ${order.deliveryTime}\n\n` +
+    `🔧 الخدمة: ${o.serviceLabel}\n` +
+    `👤 الاسم: ${o.customerName}\n\n` +
+    `📍 *الاستلام:*\n   ${fmtLocation(o.pickup)}\n\n` +
+    `🎯 *التسليم:*\n   ${fmtLocation(o.dropoff)}\n\n` +
+    `📦 الشحنة: ${o.packageNote}\n` +
+    `${o.vehicleLabel}\n` +
+    `🚗 المسافة التقريبية: ${o.distanceKm} كم\n` +
+    `⏱️ الوقت التقديري: ${o.etaMinutes} دقيقة\n` +
+    `💵 سعر التوصيل التقريبي: ${o.deliveryPrice} ${CURRENCY}\n` +
+    `💳 الدفع: ${o.paymentMethod}\n` +
+    `⏰ وقت التوصيل: ${o.deliveryTime}\n\n` +
     'هل البيانات صحيحة؟ اكتب *نعم* للتأكيد أو *لا* للإلغاء.'
   );
+}
+
+// تطبيع رقم جوال بسيط
+function normPhone(raw) {
+  const digits = (raw || '').replace(/[^\d+]/g, '');
+  return digits.replace(/\D/g, '').length >= 8 ? digits : null;
+}
+
+// هل يريد المستخدم تخطّي حقل اختياري؟
+function isSkip(raw) {
+  const t = normalize(raw);
+  return t === '-' || t === 'لا' || t === 'تخطي' || t === 'تخطى' || t === 'skip' || t === 'لا يوجد';
 }
 
 /**
@@ -400,67 +463,132 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
     case STATES.AWAITING_NAME: {
       if (!raw) return 'من فضلك اكتب اسمك للمتابعة. 🙏';
       session.order.customerName = raw;
-      session.state = STATES.AWAITING_SOURCE;
-      const prompts = SERVICE_PROMPTS[session.order.serviceType];
-      return `تشرفنا يا ${raw} 🌟\n\n*الخطوة 2:* ${prompts.source}`;
-    }
-
-    case STATES.AWAITING_SOURCE: {
-      if (!raw) return 'من فضلك أكمل هذه الخطوة للمتابعة. 🙏';
-      session.order.source = raw;
-      session.state = STATES.AWAITING_DETAILS;
-      const prompts = SERVICE_PROMPTS[session.order.serviceType];
-      return `*الخطوة 3:* ${prompts.details}`;
-    }
-
-    case STATES.AWAITING_DETAILS: {
-      if (!raw) return 'من فضلك اكتب التفاصيل للمتابعة. 📝';
-      session.order.details = raw;
+      session.order.pickup = {};
+      session.order.dropoff = {};
       session.state = STATES.AWAITING_PICKUP_HOOD;
-      return '*الخطوة 4:* اختر *حي الاستلام* (من أين نستلم؟) 📍\n\n' + NEIGHBORHOOD_MENU + '\n\nاكتب رقم الحي.';
+      return `تشرفنا يا ${raw} 🌟\n\nلنبدأ بعنوان *الاستلام* 📍\n\n*حي الاستلام:*\n${NEIGHBORHOOD_MENU}\n\nاكتب رقم الحي.`;
     }
 
+    // ===== نقطة الاستلام =====
     case STATES.AWAITING_PICKUP_HOOD: {
       const idx = parseInt(raw, 10);
       const hood = Number.isInteger(idx) ? _hoodByIndex[idx - 1] : null;
-      if (!hood) {
-        return 'من فضلك اكتب رقم حي صحيحاً:\n\n' + NEIGHBORHOOD_MENU;
-      }
-      session.order.pickupHood = hood.name;
-      session.order.pickupCoords = hood.coordinates;
-      session.state = STATES.AWAITING_DROPOFF_HOOD;
-      return '*الخطوة 5:* اختر *حي التسليم* (إلى أين نوصّل؟) 🎯\n\n' + NEIGHBORHOOD_MENU + '\n\nاكتب رقم الحي.';
+      if (!hood) return 'من فضلك اكتب رقم حي صحيحاً:\n\n' + NEIGHBORHOOD_MENU;
+      session.order.pickup.neighborhood = hood.name;
+      session.order.pickup.coordinates = hood.coordinates;
+      session.state = STATES.AWAITING_PICKUP_STREET;
+      return 'اكتب اسم *الشارع* لنقطة الاستلام 🛣️';
     }
 
+    case STATES.AWAITING_PICKUP_STREET: {
+      if (!raw) return 'من فضلك اكتب اسم الشارع. 🛣️';
+      session.order.pickup.street = raw;
+      session.state = STATES.AWAITING_PICKUP_DETAILS;
+      return 'اكتب *تفاصيل عنوان الاستلام* 🏠 (بناية/طابق/أقرب معلم)';
+    }
+
+    case STATES.AWAITING_PICKUP_DETAILS: {
+      if (!raw) return 'من فضلك اكتب تفاصيل العنوان. 🏠';
+      session.order.pickup.details = raw;
+      session.state = STATES.AWAITING_PICKUP_NOTE;
+      return 'أي *ملاحظة* لنقطة الاستلام؟ 📝 (اكتب "-" للتخطي)';
+    }
+
+    case STATES.AWAITING_PICKUP_NOTE: {
+      session.order.pickup.note = isSkip(raw) ? '' : raw;
+      session.state = STATES.AWAITING_PICKUP_CONTACT_NAME;
+      return 'اسم *جهة الاتصال* عند الاستلام 👤 (مثلاً: اسم المطعم/المتجر/المرسِل)';
+    }
+
+    case STATES.AWAITING_PICKUP_CONTACT_NAME: {
+      if (!raw) return 'من فضلك اكتب اسم جهة الاتصال. 👤';
+      session.order.pickup.contactName = raw;
+      session.state = STATES.AWAITING_PICKUP_CONTACT_PHONE;
+      return 'رقم *جوال* جهة الاستلام 📱';
+    }
+
+    case STATES.AWAITING_PICKUP_CONTACT_PHONE: {
+      const p = normPhone(raw);
+      if (!p) return 'الرقم غير واضح. اكتب رقم جوال صحيحاً 📱 (مثال: 059xxxxxxx).';
+      session.order.pickup.contactPhone = p;
+      session.state = STATES.AWAITING_DROPOFF_HOOD;
+      return `✅ تم حفظ عنوان الاستلام.\n\nالآن عنوان *التسليم* 🎯\n\n*حي التسليم:*\n${NEIGHBORHOOD_MENU}\n\nاكتب رقم الحي.`;
+    }
+
+    // ===== نقطة التسليم =====
     case STATES.AWAITING_DROPOFF_HOOD: {
       const idx = parseInt(raw, 10);
       const hood = Number.isInteger(idx) ? _hoodByIndex[idx - 1] : null;
-      if (!hood) {
-        return 'من فضلك اكتب رقم حي صحيحاً:\n\n' + NEIGHBORHOOD_MENU;
-      }
-      session.order.dropoffHood = hood.name;
-      session.order.dropoffCoords = hood.coordinates;
-      const q = quote(session.order.pickupCoords, session.order.dropoffCoords);
+      if (!hood) return 'من فضلك اكتب رقم حي صحيحاً:\n\n' + NEIGHBORHOOD_MENU;
+      session.order.dropoff.neighborhood = hood.name;
+      session.order.dropoff.coordinates = hood.coordinates;
+      // نحسب المسافة والسعر بمجرد توفّر الحيّين (يُعرَض مع المركبة لاحقاً)
+      const q = quote(session.order.pickup.coordinates, session.order.dropoff.coordinates);
       session.order.distanceKm = q.distanceKm;
       session.order.deliveryPrice = q.price;
-      session.state = STATES.AWAITING_PHONE;
-      return (
-        '✅ تم تحديد المسار.\n\n' +
-        `📍 من: ${session.order.pickupHood}  ←  🎯 إلى: ${session.order.dropoffHood}\n` +
-        `🚗 المسافة التقريبية: *${q.distanceKm} كم*\n` +
-        `💵 سعر التوصيل التقريبي: *${q.price} ${CURRENCY}*\n\n` +
-        '*الخطوة 6:* اكتب *رقم جوال* للتواصل معك بخصوص الطلب 📱'
-      );
+      session.state = STATES.AWAITING_DROPOFF_STREET;
+      return 'اكتب اسم *الشارع* لنقطة التسليم 🛣️';
     }
 
-    case STATES.AWAITING_PHONE: {
-      const digits = raw.replace(/[^\d+]/g, '');
-      if (digits.replace(/\D/g, '').length < 8) {
-        return 'الرقم غير واضح. من فضلك اكتب رقم جوال صحيحاً 📱 (مثال: 09xxxxxxxx).';
-      }
-      session.order.contactPhone = digits;
+    case STATES.AWAITING_DROPOFF_STREET: {
+      if (!raw) return 'من فضلك اكتب اسم الشارع. 🛣️';
+      session.order.dropoff.street = raw;
+      session.state = STATES.AWAITING_DROPOFF_DETAILS;
+      return 'اكتب *تفاصيل عنوان التسليم* 🏠 (بناية/طابق/أقرب معلم)';
+    }
+
+    case STATES.AWAITING_DROPOFF_DETAILS: {
+      if (!raw) return 'من فضلك اكتب تفاصيل العنوان. 🏠';
+      session.order.dropoff.details = raw;
+      session.state = STATES.AWAITING_DROPOFF_NOTE;
+      return 'أي *ملاحظة* لنقطة التسليم؟ 📝 (اكتب "-" للتخطي)';
+    }
+
+    case STATES.AWAITING_DROPOFF_NOTE: {
+      session.order.dropoff.note = isSkip(raw) ? '' : raw;
+      session.state = STATES.AWAITING_DROPOFF_CONTACT_NAME;
+      return 'اسم *جهة الاتصال* عند التسليم 👤 (اسم المستلِم)';
+    }
+
+    case STATES.AWAITING_DROPOFF_CONTACT_NAME: {
+      if (!raw) return 'من فضلك اكتب اسم المستلِم. 👤';
+      session.order.dropoff.contactName = raw;
+      session.state = STATES.AWAITING_DROPOFF_CONTACT_PHONE;
+      return 'رقم *جوال* المستلِم 📱';
+    }
+
+    case STATES.AWAITING_DROPOFF_CONTACT_PHONE: {
+      const p = normPhone(raw);
+      if (!p) return 'الرقم غير واضح. اكتب رقم جوال صحيحاً 📱 (مثال: 059xxxxxxx).';
+      session.order.dropoff.contactPhone = p;
+      session.state = STATES.AWAITING_PACKAGE_NOTE;
+      const prompts = SERVICE_PROMPTS[session.order.serviceType];
+      return `✅ تم حفظ عنوان التسليم.\n\n*وصف الشحنة:* ${prompts.details}`;
+    }
+
+    // ===== وصف الشحنة + المركبة =====
+    case STATES.AWAITING_PACKAGE_NOTE: {
+      if (!raw) return 'من فضلك اكتب وصف الشحنة/الطلب. 📦';
+      session.order.packageNote = raw;
+      session.state = STATES.AWAITING_VEHICLE;
+      return VEHICLE_MENU;
+    }
+
+    case STATES.AWAITING_VEHICLE: {
+      const v = VEHICLE_TYPES[raw];
+      if (!v) return 'من فضلك اختر رقماً صحيحاً:\n\n' + VEHICLE_MENU;
+      session.order.vehicleType = v.key;
+      session.order.vehicleLabel = v.label;
+      session.order.etaMinutes = estimateEtaMinutes(session.order.distanceKm, v.key);
       session.state = STATES.AWAITING_PAYMENT;
-      return '*الخطوة 7:* ' + PAYMENT_MENU;
+      return (
+        '✅ تم حساب طلبك:\n\n' +
+        `📍 ${session.order.pickup.neighborhood}  ←  🎯 ${session.order.dropoff.neighborhood}\n` +
+        `🚗 المسافة: *${session.order.distanceKm} كم*\n` +
+        `⏱️ الوقت التقديري: *${session.order.etaMinutes} دقيقة*\n` +
+        `💵 سعر التوصيل: *${session.order.deliveryPrice} ${CURRENCY}*\n\n` +
+        PAYMENT_MENU
+      );
     }
 
     case STATES.AWAITING_PAYMENT: {
@@ -489,13 +617,19 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
         );
       }
       session.order.paymentProof = hasMedia ? 'image' : 'text_confirmation';
-      session.state = STATES.AWAITING_TIME;
+      session.state = STATES.AWAITING_SCHEDULE;
       return 'تم استلام إشعار الحوالة ✅ شكراً لك.\n\n*الخطوة الأخيرة:* ' + TIME_MENU;
     }
 
-    case STATES.AWAITING_TIME: {
+    case STATES.AWAITING_SCHEDULE: {
       if (!raw) return 'من فضلك حدّد وقت التوصيل. ⏰';
-      session.order.deliveryTime = raw === '1' ? 'في أسرع وقت (الآن) ⚡' : raw;
+      if (raw === '1') {
+        session.order.scheduledAt = null;
+        session.order.deliveryTime = 'في أسرع وقت (الآن) ⚡';
+      } else {
+        session.order.scheduledAt = raw; // نص الوقت كما أدخله العميل
+        session.order.deliveryTime = raw;
+      }
       session.state = STATES.CONFIRMATION;
       return buildSummary(session.order);
     }
@@ -503,24 +637,29 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
     case STATES.CONFIRMATION: {
       if (includesAny(raw, YES_KEYWORDS)) {
         const ref = generateOrderRef();
+        const deliveryCode = generateDeliveryCode();
+        const s = session.order;
         const order = {
           ref,
           whatsapp: phone,
-          serviceType: session.order.serviceType,
-          serviceLabel: session.order.serviceLabel,
-          customerName: session.order.customerName,
-          source: session.order.source,
-          details: session.order.details,
-          pickupHood: session.order.pickupHood,
-          dropoffHood: session.order.dropoffHood,
-          distanceKm: session.order.distanceKm,
-          deliveryPrice: session.order.deliveryPrice,
+          serviceType: s.serviceType,
+          serviceLabel: s.serviceLabel,
+          customerName: s.customerName,
+          pickup: s.pickup,
+          dropoff: s.dropoff,
+          packageNote: s.packageNote,
+          vehicleType: s.vehicleType,
+          vehicleLabel: s.vehicleLabel,
+          distanceKm: s.distanceKm,
+          etaMinutes: s.etaMinutes,
+          price: s.deliveryPrice,
           currency: CURRENCY,
-          contactPhone: session.order.contactPhone,
-          paymentMethod: session.order.paymentMethod,
-          paymentProof: session.order.paymentProof || 'none',
-          deliveryTime: session.order.deliveryTime,
-          status: 'new',
+          deliveryCode,
+          paymentMethod: s.paymentMethod,
+          paymentProof: s.paymentProof || 'none',
+          scheduledAt: s.scheduledAt || null,
+          deliveryTime: s.deliveryTime,
+          status: 'pending', // مطابق للتطبيق: بانتظار الإسناد
           createdAt: new Date().toISOString(),
         };
 
@@ -530,8 +669,11 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
         return (
           'شكراً لك! تم استلام طلبك بنجاح ✅\n\n' +
           `🔖 رقمك المرجعي: *${ref}*\n` +
-          `💵 سعر التوصيل التقديري: *${order.deliveryPrice} ${CURRENCY}*\n\n` +
-          'سيتواصل معك مندوبنا قريباً لتأكيد التفاصيل. يلا ديلفري 🛵💨\n\n' +
+          `🔐 كود التسليم: *${deliveryCode}*\n` +
+          `💵 سعر التوصيل التقريبي: *${order.price} ${CURRENCY}*\n` +
+          `⏱️ الوقت التقديري: *${order.etaMinutes} دقيقة*\n\n` +
+          '⚠️ احتفظ بـ*كود التسليم* وأعطه للمندوب عند استلامك الطلب لتأكيد التسليم.\n\n' +
+          'سيتواصل معك مندوبنا قريباً. يلا ديلفري 🛵💨\n\n' +
           APP_DOWNLOAD_MESSAGE +
           '\n\nاكتب "طلب" لإنشاء طلب جديد في أي وقت.'
         );
