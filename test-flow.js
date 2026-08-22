@@ -13,7 +13,8 @@ const PHONE = '970000000000';
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
 console.log('🧪 وضع اختبار يلا ديلفري (بلا واتساب). اكتب رسالتك ثم Enter. للخروج: /exit\n');
-console.log('جرّب مثلاً: مرحبا  ثم  1  ثم  1 ...\n');
+console.log('جرّب مثلاً: مرحبا  ثم  1  ثم  1 ...');
+console.log('عند طلب الموقع، اكتب إحداثيات مثل: 31.95,35.91 (لمحاكاة مشاركة الموقع)\n');
 
 function ask() {
   rl.question('👤 أنت: ', async (line) => {

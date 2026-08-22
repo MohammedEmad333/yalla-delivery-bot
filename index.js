@@ -39,6 +39,16 @@ const ORDERS_FILE = process.env.ORDERS_FILE || path.join(__dirname, 'orders.json
 const APP_ANDROID_URL = process.env.APP_ANDROID_URL || 'https://play.google.com/store/apps/details?id=com.yalladelivery';
 const APP_IOS_URL = process.env.APP_IOS_URL || 'https://apps.apple.com/app/yalla-delivery';
 
+// ===== إعدادات تسعير التوصيل حسب المسافة (عدّل الأرقام لعملك) =====
+const CURRENCY = process.env.CURRENCY || '₪'; // العملة الظاهرة للعميل
+// موقع متجرك/مقرّك (نقطة انطلاق التوصيل). احصل عليه من خرائط جوجل: زر يمين ← نسخ الإحداثيات.
+const BASE_LAT = parseFloat(process.env.BASE_LAT || '31.9038'); // مثال (عدّله)
+const BASE_LNG = parseFloat(process.env.BASE_LNG || '35.2034'); // مثال (عدّله)
+const DELIVERY_BASE_FARE = parseFloat(process.env.DELIVERY_BASE_FARE || '5'); // رسوم انطلاق ثابتة
+const DELIVERY_PER_KM = parseFloat(process.env.DELIVERY_PER_KM || '3'); // سعر كل كيلومتر
+const DELIVERY_MIN_FARE = parseFloat(process.env.DELIVERY_MIN_FARE || '10'); // أقل سعر توصيل
+const ROAD_FACTOR = parseFloat(process.env.ROAD_FACTOR || '1.3'); // معامل تحويل الخط المستقيم لمسافة طرق تقريبية
+
 // طريقة الربط: رمز اقتران (Pairing Code) بدل مسح QR.
 // فعّلها بوضع USE_PAIRING_CODE=true ورقم واتساب الأعمال (أرقام فقط بدون + أو مسافات).
 const USE_PAIRING_CODE = String(process.env.USE_PAIRING_CODE || 'true').toLowerCase() === 'true';
@@ -168,11 +178,11 @@ const SERVICE_MENU =
   'اكتب رقم الخدمة (1 / 2 / 3).';
 
 const PRICING_MESSAGE =
-  '💰 *الأسعار والمناطق*\n\n' +
-  '• 🍔 توصيل طعام: تبدأ من 15 وحدة داخل المدينة.\n' +
-  '• 📦 توصيل طرود: حسب المسافة والحجم.\n' +
-  '• 🛒 توصيل بقالة: رسوم التوصيل + قيمة المشتريات.\n' +
-  '• التوصيل السريع متاح خلال 60 دقيقة.\n\n' +
+  '💰 *الأسعار*\n\n' +
+  `• سعر التوصيل يُحسب *حسب المسافة* إلى موقعك.\n` +
+  `• رسوم الانطلاق: ${DELIVERY_BASE_FARE} ${CURRENCY} + ${DELIVERY_PER_KM} ${CURRENCY}/كم.\n` +
+  `• أقل سعر توصيل: ${DELIVERY_MIN_FARE} ${CURRENCY}.\n\n` +
+  'ابدأ طلباً وشارك موقعك لتعرف السعر الدقيق فوراً.\n' +
   'اكتب "طلب" لبدء طلب جديد، أو "إلغاء" للعودة للقائمة.';
 
 const SUPPORT_NUMBER = process.env.SUPPORT_NUMBER || '+970593456405';
@@ -218,6 +228,37 @@ function generateOrderRef() {
   return `YD-${ts}${rand}`;
 }
 
+// حساب المسافة بخط مستقيم بين نقطتين (Haversine) بالكيلومتر
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371; // نصف قطر الأرض بالكيلومتر
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// تقدير سعر التوصيل من موقع المتجر إلى موقع العميل
+function estimateDelivery(dropLat, dropLng) {
+  const straight = haversineKm(BASE_LAT, BASE_LNG, dropLat, dropLng);
+  const distanceKm = Math.max(0, straight * ROAD_FACTOR);
+  const raw = DELIVERY_BASE_FARE + DELIVERY_PER_KM * distanceKm;
+  const price = Math.max(DELIVERY_MIN_FARE, Math.ceil(raw)); // تقريب لأعلى
+  return { distanceKm: Math.round(distanceKm * 10) / 10, price };
+}
+
+// استخراج إحداثيات من نص "lat,lng" (لدعم الاختبار أو لصق الإحداثيات)
+function parseCoords(text) {
+  const m = (text || '').match(/(-?\d{1,3}\.\d+)\s*[,،]\s*(-?\d{1,3}\.\d+)/);
+  if (!m) return null;
+  const lat = parseFloat(m[1]);
+  const lng = parseFloat(m[2]);
+  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  return { lat, lng };
+}
+
 // ==========================================================
 //  حفظ الطلب محلياً في ملف orders.json (بوت مستقل)
 // ==========================================================
@@ -255,7 +296,9 @@ function buildSummary(order) {
     `👤 الاسم: ${order.customerName}\n` +
     `🏬 المصدر: ${order.source}\n` +
     `📝 التفاصيل: ${order.details}\n` +
-    `🎯 التسليم إلى: ${order.dropoff}\n` +
+    `📍 موقع التسليم: ${order.mapsLink}\n` +
+    `🚗 المسافة التقريبية: ${order.distanceKm} كم\n` +
+    `💵 سعر التوصيل التقديري: ${order.deliveryPrice} ${CURRENCY}\n` +
     `📱 جوال التواصل: ${order.contactPhone}\n` +
     `💳 الدفع: ${order.paymentMethod}\n` +
     `⏰ وقت التوصيل: ${order.deliveryTime}\n\n` +
@@ -266,7 +309,7 @@ function buildSummary(order) {
 /**
  * يعالج رسالة نصية واردة ويعيد نص الرد (أو مصفوفة ردود).
  */
-async function handleMessage(jid, phone, text) {
+async function handleMessage(jid, phone, text, location) {
   const session = getSession(jid);
   const raw = (text || '').trim();
 
@@ -328,14 +371,36 @@ async function handleMessage(jid, phone, text) {
       if (!raw) return 'من فضلك اكتب التفاصيل للمتابعة. 📝';
       session.order.details = raw;
       session.state = STATES.AWAITING_DROPOFF;
-      return '*الخطوة 4:* أين نوصّل الطلب؟ 🎯 (عنوان التسليم بالتفصيل: الحي/الشارع/أقرب معلم)';
+      return (
+        '*الخطوة 4:* شارك *موقع التسليم* 📍 لنحسب لك سعر التوصيل:\n\n' +
+        '📎 اضغط زر المُشبك (➕) ← *الموقع* (Location) ← *موقعي الحالي* أو اختر نقطة على الخريطة.\n\n' +
+        '💡 أرسل الموقع وسنخبرك بالسعر فوراً.'
+      );
     }
 
     case STATES.AWAITING_DROPOFF: {
-      if (!raw) return 'من فضلك اكتب عنوان التسليم. 🎯';
-      session.order.dropoff = raw;
+      // نقبل موقع واتساب، أو إحداثيات مكتوبة "lat,lng"
+      const loc = location || parseCoords(raw);
+      if (!loc) {
+        return (
+          'لم أستلم موقعاً 📍. من فضلك *شارك موقعك* عبر واتساب:\n' +
+          '📎 المُشبك (➕) ← الموقع (Location) ← موقعي الحالي.\n\n' +
+          '(أو أرسل الإحداثيات نصاً بصيغة: 31.90,35.20)'
+        );
+      }
+      const est = estimateDelivery(loc.lat, loc.lng);
+      session.order.dropLat = loc.lat;
+      session.order.dropLng = loc.lng;
+      session.order.mapsLink = `https://www.google.com/maps?q=${loc.lat},${loc.lng}`;
+      session.order.distanceKm = est.distanceKm;
+      session.order.deliveryPrice = est.price;
       session.state = STATES.AWAITING_PHONE;
-      return '*الخطوة 5:* اكتب *رقم جوال* للتواصل معك بخصوص الطلب 📱';
+      return (
+        '✅ تم استلام موقعك.\n\n' +
+        `🚗 المسافة التقريبية: *${est.distanceKm} كم*\n` +
+        `💵 سعر التوصيل التقديري: *${est.price} ${CURRENCY}*\n\n` +
+        '*الخطوة 5:* اكتب *رقم جوال* للتواصل معك بخصوص الطلب 📱'
+      );
     }
 
     case STATES.AWAITING_PHONE: {
@@ -376,7 +441,12 @@ async function handleMessage(jid, phone, text) {
           customerName: session.order.customerName,
           source: session.order.source,
           details: session.order.details,
-          dropoff: session.order.dropoff,
+          dropLat: session.order.dropLat,
+          dropLng: session.order.dropLng,
+          mapsLink: session.order.mapsLink,
+          distanceKm: session.order.distanceKm,
+          deliveryPrice: session.order.deliveryPrice,
+          currency: CURRENCY,
           contactPhone: session.order.contactPhone,
           paymentMethod: session.order.paymentMethod,
           deliveryTime: session.order.deliveryTime,
@@ -389,7 +459,8 @@ async function handleMessage(jid, phone, text) {
 
         return (
           'شكراً لك! تم استلام طلبك بنجاح ✅\n\n' +
-          `🔖 رقمك المرجعي: *${ref}*\n\n` +
+          `🔖 رقمك المرجعي: *${ref}*\n` +
+          `💵 سعر التوصيل التقديري: *${order.deliveryPrice} ${CURRENCY}*\n\n` +
           'سيتواصل معك مندوبنا قريباً لتأكيد التفاصيل. يلا ديلفري 🛵💨\n\n' +
           APP_DOWNLOAD_MESSAGE +
           '\n\nاكتب "طلب" لإنشاء طلب جديد في أي وقت.'
@@ -414,6 +485,16 @@ async function handleMessage(jid, phone, text) {
 // ==========================================================
 //  استخراج نص الرسالة من كائن Baileys
 // ==========================================================
+function extractLocation(msg) {
+  const m = msg.message;
+  if (!m) return null;
+  const loc = m.locationMessage || m.liveLocationMessage;
+  if (loc && typeof loc.degreesLatitude === 'number' && typeof loc.degreesLongitude === 'number') {
+    return { lat: loc.degreesLatitude, lng: loc.degreesLongitude };
+  }
+  return null;
+}
+
 function extractText(msg) {
   const m = msg.message;
   if (!m) return '';
@@ -564,13 +645,14 @@ async function startBot() {
         if (!jid || jid.endsWith('@g.us') || jid.endsWith('@broadcast') || jid.endsWith('@newsletter')) continue;
 
         const text = extractText(msg);
-        if (!text) continue;
+        const location = extractLocation(msg);
+        if (!text && !location) continue; // تجاهل الأنواع الأخرى (صور/صوت...)
 
         const phone = jid.split('@')[0];
 
         await sock.sendPresenceUpdate('composing', jid).catch(() => {});
 
-        const reply = await handleMessage(jid, phone, text);
+        const reply = await handleMessage(jid, phone, text, location);
 
         const replies = Array.isArray(reply) ? reply : [reply];
         for (const r of replies) {
