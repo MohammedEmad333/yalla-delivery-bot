@@ -127,6 +127,7 @@ const STATES = {
   AWAITING_DROPOFF_HOOD: 'AWAITING_DROPOFF_HOOD', // حي التسليم (لحساب السعر)
   AWAITING_PHONE: 'AWAITING_PHONE',
   AWAITING_PAYMENT: 'AWAITING_PAYMENT',
+  AWAITING_PAYMENT_PROOF: 'AWAITING_PAYMENT_PROOF', // انتظار إشعار الحوالة
   AWAITING_TIME: 'AWAITING_TIME',
   CONFIRMATION: 'CONFIRMATION',
 };
@@ -159,6 +160,17 @@ const PAYMENT_METHODS = {
   1: 'بنك فلسطين 🏦',
   2: 'محفظة بال بي 📱',
   3: 'جوال بي 📲',
+};
+
+// اسم صاحب الحساب ورقمه لكل طرق الدفع (عدّلها عند الحاجة)
+const PAYEE_NAME = process.env.PAYEE_NAME || 'إبراهيم محمد عطا قنديل';
+const PAYEE_NUMBER = process.env.PAYEE_NUMBER || '0593456405';
+
+// تفاصيل التحويل لكل طريقة دفع
+const PAYMENT_DETAILS = {
+  1: `🏦 *بنك فلسطين*\n👤 الاسم: ${PAYEE_NAME}\n🔢 الرقم: ${PAYEE_NUMBER}`,
+  2: `📱 *محفظة بال بي*\n👤 الاسم: ${PAYEE_NAME}\n🔢 الرقم: ${PAYEE_NUMBER}`,
+  3: `📲 *جوال بي*\n👤 الاسم: ${PAYEE_NAME}\n🔢 الرقم: ${PAYEE_NUMBER}`,
 };
 
 // sessions[jid] = { state, order: {...} }
@@ -343,7 +355,7 @@ function buildSummary(order) {
 /**
  * يعالج رسالة نصية واردة ويعيد نص الرد (أو مصفوفة ردود).
  */
-async function handleMessage(jid, phone, text) {
+async function handleMessage(jid, phone, text, hasMedia = false) {
   const session = getSession(jid);
   const raw = (text || '').trim();
 
@@ -457,8 +469,28 @@ async function handleMessage(jid, phone, text) {
         return 'من فضلك اختر رقماً صحيحاً:\n\n' + PAYMENT_MENU;
       }
       session.order.paymentMethod = method;
+      session.state = STATES.AWAITING_PAYMENT_PROOF;
+      return (
+        `اخترت: ${method} ✅\n\n` +
+        'يرجى تحويل المبلغ إلى:\n\n' +
+        PAYMENT_DETAILS[raw] +
+        `\n\n💵 سعر التوصيل: *${session.order.deliveryPrice} ${CURRENCY}*\n\n` +
+        '📸 بعد إتمام التحويل، أرسل *صورة إشعار الحوالة* هنا لتأكيد الدفع.'
+      );
+    }
+
+    case STATES.AWAITING_PAYMENT_PROOF: {
+      // نقبل صورة إشعار الحوالة، أو تأكيداً نصياً (تم/حولت...)
+      const confirmedByText = includesAny(raw, ['تم', 'حولت', 'حولت المبلغ', 'أرسلت', 'ارسلت', 'دفعت', 'done', 'ok']);
+      if (!hasMedia && !confirmedByText) {
+        return (
+          '📸 بانتظار *صورة إشعار الحوالة*.\n' +
+          'أرسل صورة الإشعار بعد التحويل، أو اكتب "تم" إن حوّلت بالفعل.'
+        );
+      }
+      session.order.paymentProof = hasMedia ? 'image' : 'text_confirmation';
       session.state = STATES.AWAITING_TIME;
-      return '*الخطوة 8:* ' + TIME_MENU;
+      return 'تم استلام إشعار الحوالة ✅ شكراً لك.\n\n*الخطوة الأخيرة:* ' + TIME_MENU;
     }
 
     case STATES.AWAITING_TIME: {
@@ -486,6 +518,7 @@ async function handleMessage(jid, phone, text) {
           currency: CURRENCY,
           contactPhone: session.order.contactPhone,
           paymentMethod: session.order.paymentMethod,
+          paymentProof: session.order.paymentProof || 'none',
           deliveryTime: session.order.deliveryTime,
           status: 'new',
           createdAt: new Date().toISOString(),
@@ -522,6 +555,13 @@ async function handleMessage(jid, phone, text) {
 // ==========================================================
 //  استخراج نص الرسالة من كائن Baileys
 // ==========================================================
+// هل الرسالة تحوي وسائط (صورة/مستند) — لاستقبال إشعار الحوالة؟
+function hasMediaMessage(msg) {
+  const m = msg.message;
+  if (!m) return false;
+  return !!(m.imageMessage || m.documentMessage || m.documentWithCaptionMessage);
+}
+
 function extractText(msg) {
   const m = msg.message;
   if (!m) return '';
@@ -672,13 +712,14 @@ async function startBot() {
         if (!jid || jid.endsWith('@g.us') || jid.endsWith('@broadcast') || jid.endsWith('@newsletter')) continue;
 
         const text = extractText(msg);
-        if (!text) continue; // نتعامل مع الرسائل النصية والأرقام فقط
+        const hasMedia = hasMediaMessage(msg);
+        if (!text && !hasMedia) continue; // نتعامل مع النص والصور (إشعار الحوالة)
 
         const phone = jid.split('@')[0];
 
         await sock.sendPresenceUpdate('composing', jid).catch(() => {});
 
-        const reply = await handleMessage(jid, phone, text);
+        const reply = await handleMessage(jid, phone, text, hasMedia);
 
         const replies = Array.isArray(reply) ? reply : [reply];
         for (const r of replies) {
