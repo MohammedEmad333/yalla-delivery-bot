@@ -39,15 +39,37 @@ const ORDERS_FILE = process.env.ORDERS_FILE || path.join(__dirname, 'orders.json
 const APP_ANDROID_URL = process.env.APP_ANDROID_URL || 'https://play.google.com/store/apps/details?id=com.yalladelivery';
 const APP_IOS_URL = process.env.APP_IOS_URL || 'https://apps.apple.com/app/yalla-delivery';
 
-// ===== إعدادات تسعير التوصيل حسب المسافة (عدّل الأرقام لعملك) =====
-const CURRENCY = process.env.CURRENCY || '₪'; // العملة الظاهرة للعميل
-// موقع متجرك/مقرّك (نقطة انطلاق التوصيل). احصل عليه من خرائط جوجل: زر يمين ← نسخ الإحداثيات.
-const BASE_LAT = parseFloat(process.env.BASE_LAT || '31.9038'); // مثال (عدّله)
-const BASE_LNG = parseFloat(process.env.BASE_LNG || '35.2034'); // مثال (عدّله)
-const DELIVERY_BASE_FARE = parseFloat(process.env.DELIVERY_BASE_FARE || '5'); // رسوم انطلاق ثابتة
-const DELIVERY_PER_KM = parseFloat(process.env.DELIVERY_PER_KM || '3'); // سعر كل كيلومتر
-const DELIVERY_MIN_FARE = parseFloat(process.env.DELIVERY_MIN_FARE || '10'); // أقل سعر توصيل
-const ROAD_FACTOR = parseFloat(process.env.ROAD_FACTOR || '1.3'); // معامل تحويل الخط المستقيم لمسافة طرق تقريبية
+// ===== تسعير التوصيل (مطابق لتطبيق يلا ديلفري — Card 27) =====
+// النموذج: كل 160 متر = 1 شيكل. المسافة بين حي الاستلام وحي التسليم (Haversine)
+// مع معامل انحناء طرق 1.3، وحدّ أدنى 3 شيكل.
+const CURRENCY = process.env.CURRENCY || '₪';
+const METERS_PER_SHEKEL = 160; // كل هذا القدر من الأمتار = 1 شيكل
+const ROAD_FACTOR = 1.3;        // معامل تعويض انحناء الطرق مقابل الخط المستقيم
+const MIN_FARE = 3;             // أقل أجرة (يمنع سعراً صفرياً داخل الحي نفسه)
+
+// أحياء مدينة غزة — لكل حي إحداثيّة تمثيلية [lng, lat] قرب مركزه (مطابقة للتطبيق)
+const GAZA_NEIGHBORHOODS = [
+  { name: 'الرمال', coordinates: [34.4450, 31.5250] },
+  { name: 'الرمال الجنوبي', coordinates: [34.4400, 31.5150] },
+  { name: 'تل الهوا', coordinates: [34.4350, 31.5050] },
+  { name: 'الشيخ عجلين', coordinates: [34.4250, 31.4950] },
+  { name: 'الصبرة', coordinates: [34.4550, 31.5100] },
+  { name: 'الزيتون', coordinates: [34.4650, 31.5000] },
+  { name: 'الشجاعية', coordinates: [34.4800, 31.5050] },
+  { name: 'التفاح', coordinates: [34.4700, 31.5150] },
+  { name: 'الدرج', coordinates: [34.4600, 31.5080] },
+  { name: 'الجلاء', coordinates: [34.4550, 31.5200] },
+  { name: 'الوحدة', coordinates: [34.4500, 31.5150] },
+  { name: 'الشيخ رضوان', coordinates: [34.4550, 31.5350] },
+  { name: 'النصر', coordinates: [34.4450, 31.5350] },
+  { name: 'الكرامة', coordinates: [34.4400, 31.5450] },
+  { name: 'السلام', coordinates: [34.4500, 31.5400] },
+  { name: 'الجديدة', coordinates: [34.4650, 31.5300] },
+  { name: 'الزرقا', coordinates: [34.4700, 31.5450] },
+  { name: 'الشاطئ', coordinates: [34.4300, 31.5300] },
+  { name: 'الميناء', coordinates: [34.4250, 31.5200] },
+  { name: 'المنطقة الصناعية', coordinates: [34.4800, 31.4900] },
+];
 
 // طريقة الربط: رمز اقتران (Pairing Code) بدل مسح QR.
 // فعّلها بوضع USE_PAIRING_CODE=true ورقم واتساب الأعمال (أرقام فقط بدون + أو مسافات).
@@ -101,7 +123,8 @@ const STATES = {
   AWAITING_NAME: 'AWAITING_NAME',
   AWAITING_SOURCE: 'AWAITING_SOURCE', // المطعم/المتجر أو عنوان الاستلام
   AWAITING_DETAILS: 'AWAITING_DETAILS', // الأصناف/قائمة الشراء/وصف الطرد
-  AWAITING_DROPOFF: 'AWAITING_DROPOFF', // عنوان التسليم
+  AWAITING_PICKUP_HOOD: 'AWAITING_PICKUP_HOOD', // حي الاستلام (لحساب السعر)
+  AWAITING_DROPOFF_HOOD: 'AWAITING_DROPOFF_HOOD', // حي التسليم (لحساب السعر)
   AWAITING_PHONE: 'AWAITING_PHONE',
   AWAITING_PAYMENT: 'AWAITING_PAYMENT',
   AWAITING_TIME: 'AWAITING_TIME',
@@ -179,10 +202,10 @@ const SERVICE_MENU =
 
 const PRICING_MESSAGE =
   '💰 *الأسعار*\n\n' +
-  `• سعر التوصيل يُحسب *حسب المسافة* إلى موقعك.\n` +
-  `• رسوم الانطلاق: ${DELIVERY_BASE_FARE} ${CURRENCY} + ${DELIVERY_PER_KM} ${CURRENCY}/كم.\n` +
-  `• أقل سعر توصيل: ${DELIVERY_MIN_FARE} ${CURRENCY}.\n\n` +
-  'ابدأ طلباً وشارك موقعك لتعرف السعر الدقيق فوراً.\n' +
+  '• سعر التوصيل يُحسب *حسب المسافة* بين حي الاستلام وحي التسليم.\n' +
+  `• كل 160 متراً = 1 ${CURRENCY} تقريباً.\n` +
+  `• أقل سعر توصيل: ${MIN_FARE} ${CURRENCY}.\n\n` +
+  'ابدأ طلباً واختر الحيّين لتعرف السعر التقريبي فوراً.\n' +
   'اكتب "طلب" لبدء طلب جديد، أو "إلغاء" للعودة للقائمة.';
 
 const SUPPORT_NUMBER = process.env.SUPPORT_NUMBER || '+970593456405';
@@ -228,35 +251,46 @@ function generateOrderRef() {
   return `YD-${ts}${rand}`;
 }
 
-// حساب المسافة بخط مستقيم بين نقطتين (Haversine) بالكيلومتر
-function haversineKm(lat1, lon1, lat2, lon2) {
-  const R = 6371; // نصف قطر الأرض بالكيلومتر
-  const toRad = (d) => (d * Math.PI) / 180;
+// فهرس: رقم الحي (1..N) → بياناته
+const _hoodByIndex = GAZA_NEIGHBORHOODS;
+
+// قائمة الأحياء المرقّمة لعرضها للعميل
+const NEIGHBORHOOD_MENU = GAZA_NEIGHBORHOODS
+  .map((n, i) => `${i + 1}. ${n.name}`)
+  .join('\n');
+
+// المسافة بين نقطتين [lng, lat] بمعادلة Haversine (خط مستقيم) — مطابق للتطبيق
+function haversineKm(a, b) {
+  const EARTH_RADIUS_KM = 6371;
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const [lng1, lat1] = a;
+  const [lng2, lat2] = b;
   const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
+  const dLng = toRad(lng2 - lng1);
+  const h =
     Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return EARTH_RADIUS_KM * 2 * Math.asin(Math.sqrt(h));
 }
 
-// تقدير سعر التوصيل من موقع المتجر إلى موقع العميل
-function estimateDelivery(dropLat, dropLng) {
-  const straight = haversineKm(BASE_LAT, BASE_LNG, dropLat, dropLng);
-  const distanceKm = Math.max(0, straight * ROAD_FACTOR);
-  const raw = DELIVERY_BASE_FARE + DELIVERY_PER_KM * distanceKm;
-  const price = Math.max(DELIVERY_MIN_FARE, Math.ceil(raw)); // تقريب لأعلى
-  return { distanceKm: Math.round(distanceKm * 10) / 10, price };
+// المسافة التقديرية بالكيلومتر (خط مستقيم × معامل الطرق) — مطابق للتطبيق
+function estimateDistanceKm(pickup, dropoff) {
+  const straight = haversineKm(pickup, dropoff);
+  return +(straight * ROAD_FACTOR).toFixed(2);
 }
 
-// استخراج إحداثيات من نص "lat,lng" (لدعم الاختبار أو لصق الإحداثيات)
-function parseCoords(text) {
-  const m = (text || '').match(/(-?\d{1,3}\.\d+)\s*[,،]\s*(-?\d{1,3}\.\d+)/);
-  if (!m) return null;
-  const lat = parseFloat(m[1]);
-  const lng = parseFloat(m[2]);
-  if (Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
-  return { lat, lng };
+// السعر التقريبي: كل 160 متر = 1 شيكل، بحدٍّ أدنى MIN_FARE — مطابق للتطبيق (Card 27)
+function calculatePrice(distanceKm) {
+  const meters = Math.max(0, Number(distanceKm) || 0) * 1000;
+  const raw = Math.round(meters / METERS_PER_SHEKEL);
+  return Math.max(MIN_FARE, raw);
+}
+
+// تسعيرة كاملة (مسافة + سعر) بين حيّين
+function quote(pickupCoords, dropoffCoords) {
+  const distanceKm = estimateDistanceKm(pickupCoords, dropoffCoords);
+  const price = calculatePrice(distanceKm);
+  return { distanceKm, price };
 }
 
 // ==========================================================
@@ -296,9 +330,9 @@ function buildSummary(order) {
     `👤 الاسم: ${order.customerName}\n` +
     `🏬 المصدر: ${order.source}\n` +
     `📝 التفاصيل: ${order.details}\n` +
-    `📍 موقع التسليم: ${order.mapsLink}\n` +
+    `📍 الاستلام: ${order.pickupHood}  ←  🎯 التسليم: ${order.dropoffHood}\n` +
     `🚗 المسافة التقريبية: ${order.distanceKm} كم\n` +
-    `💵 سعر التوصيل التقديري: ${order.deliveryPrice} ${CURRENCY}\n` +
+    `💵 سعر التوصيل التقريبي: ${order.deliveryPrice} ${CURRENCY}\n` +
     `📱 جوال التواصل: ${order.contactPhone}\n` +
     `💳 الدفع: ${order.paymentMethod}\n` +
     `⏰ وقت التوصيل: ${order.deliveryTime}\n\n` +
@@ -309,7 +343,7 @@ function buildSummary(order) {
 /**
  * يعالج رسالة نصية واردة ويعيد نص الرد (أو مصفوفة ردود).
  */
-async function handleMessage(jid, phone, text, location) {
+async function handleMessage(jid, phone, text) {
   const session = getSession(jid);
   const raw = (text || '').trim();
 
@@ -370,36 +404,40 @@ async function handleMessage(jid, phone, text, location) {
     case STATES.AWAITING_DETAILS: {
       if (!raw) return 'من فضلك اكتب التفاصيل للمتابعة. 📝';
       session.order.details = raw;
-      session.state = STATES.AWAITING_DROPOFF;
-      return (
-        '*الخطوة 4:* شارك *موقع التسليم* 📍 لنحسب لك سعر التوصيل:\n\n' +
-        '📎 اضغط زر المُشبك (➕) ← *الموقع* (Location) ← *موقعي الحالي* أو اختر نقطة على الخريطة.\n\n' +
-        '💡 أرسل الموقع وسنخبرك بالسعر فوراً.'
-      );
+      session.state = STATES.AWAITING_PICKUP_HOOD;
+      return '*الخطوة 4:* اختر *حي الاستلام* (من أين نستلم؟) 📍\n\n' + NEIGHBORHOOD_MENU + '\n\nاكتب رقم الحي.';
     }
 
-    case STATES.AWAITING_DROPOFF: {
-      // نقبل موقع واتساب، أو إحداثيات مكتوبة "lat,lng"
-      const loc = location || parseCoords(raw);
-      if (!loc) {
-        return (
-          'لم أستلم موقعاً 📍. من فضلك *شارك موقعك* عبر واتساب:\n' +
-          '📎 المُشبك (➕) ← الموقع (Location) ← موقعي الحالي.\n\n' +
-          '(أو أرسل الإحداثيات نصاً بصيغة: 31.90,35.20)'
-        );
+    case STATES.AWAITING_PICKUP_HOOD: {
+      const idx = parseInt(raw, 10);
+      const hood = Number.isInteger(idx) ? _hoodByIndex[idx - 1] : null;
+      if (!hood) {
+        return 'من فضلك اكتب رقم حي صحيحاً:\n\n' + NEIGHBORHOOD_MENU;
       }
-      const est = estimateDelivery(loc.lat, loc.lng);
-      session.order.dropLat = loc.lat;
-      session.order.dropLng = loc.lng;
-      session.order.mapsLink = `https://www.google.com/maps?q=${loc.lat},${loc.lng}`;
-      session.order.distanceKm = est.distanceKm;
-      session.order.deliveryPrice = est.price;
+      session.order.pickupHood = hood.name;
+      session.order.pickupCoords = hood.coordinates;
+      session.state = STATES.AWAITING_DROPOFF_HOOD;
+      return '*الخطوة 5:* اختر *حي التسليم* (إلى أين نوصّل؟) 🎯\n\n' + NEIGHBORHOOD_MENU + '\n\nاكتب رقم الحي.';
+    }
+
+    case STATES.AWAITING_DROPOFF_HOOD: {
+      const idx = parseInt(raw, 10);
+      const hood = Number.isInteger(idx) ? _hoodByIndex[idx - 1] : null;
+      if (!hood) {
+        return 'من فضلك اكتب رقم حي صحيحاً:\n\n' + NEIGHBORHOOD_MENU;
+      }
+      session.order.dropoffHood = hood.name;
+      session.order.dropoffCoords = hood.coordinates;
+      const q = quote(session.order.pickupCoords, session.order.dropoffCoords);
+      session.order.distanceKm = q.distanceKm;
+      session.order.deliveryPrice = q.price;
       session.state = STATES.AWAITING_PHONE;
       return (
-        '✅ تم استلام موقعك.\n\n' +
-        `🚗 المسافة التقريبية: *${est.distanceKm} كم*\n` +
-        `💵 سعر التوصيل التقديري: *${est.price} ${CURRENCY}*\n\n` +
-        '*الخطوة 5:* اكتب *رقم جوال* للتواصل معك بخصوص الطلب 📱'
+        '✅ تم تحديد المسار.\n\n' +
+        `📍 من: ${session.order.pickupHood}  ←  🎯 إلى: ${session.order.dropoffHood}\n` +
+        `🚗 المسافة التقريبية: *${q.distanceKm} كم*\n` +
+        `💵 سعر التوصيل التقريبي: *${q.price} ${CURRENCY}*\n\n` +
+        '*الخطوة 6:* اكتب *رقم جوال* للتواصل معك بخصوص الطلب 📱'
       );
     }
 
@@ -410,7 +448,7 @@ async function handleMessage(jid, phone, text, location) {
       }
       session.order.contactPhone = digits;
       session.state = STATES.AWAITING_PAYMENT;
-      return '*الخطوة 6:* ' + PAYMENT_MENU;
+      return '*الخطوة 7:* ' + PAYMENT_MENU;
     }
 
     case STATES.AWAITING_PAYMENT: {
@@ -420,7 +458,7 @@ async function handleMessage(jid, phone, text, location) {
       }
       session.order.paymentMethod = method;
       session.state = STATES.AWAITING_TIME;
-      return '*الخطوة 7:* ' + TIME_MENU;
+      return '*الخطوة 8:* ' + TIME_MENU;
     }
 
     case STATES.AWAITING_TIME: {
@@ -441,9 +479,8 @@ async function handleMessage(jid, phone, text, location) {
           customerName: session.order.customerName,
           source: session.order.source,
           details: session.order.details,
-          dropLat: session.order.dropLat,
-          dropLng: session.order.dropLng,
-          mapsLink: session.order.mapsLink,
+          pickupHood: session.order.pickupHood,
+          dropoffHood: session.order.dropoffHood,
           distanceKm: session.order.distanceKm,
           deliveryPrice: session.order.deliveryPrice,
           currency: CURRENCY,
@@ -485,16 +522,6 @@ async function handleMessage(jid, phone, text, location) {
 // ==========================================================
 //  استخراج نص الرسالة من كائن Baileys
 // ==========================================================
-function extractLocation(msg) {
-  const m = msg.message;
-  if (!m) return null;
-  const loc = m.locationMessage || m.liveLocationMessage;
-  if (loc && typeof loc.degreesLatitude === 'number' && typeof loc.degreesLongitude === 'number') {
-    return { lat: loc.degreesLatitude, lng: loc.degreesLongitude };
-  }
-  return null;
-}
-
 function extractText(msg) {
   const m = msg.message;
   if (!m) return '';
@@ -645,14 +672,13 @@ async function startBot() {
         if (!jid || jid.endsWith('@g.us') || jid.endsWith('@broadcast') || jid.endsWith('@newsletter')) continue;
 
         const text = extractText(msg);
-        const location = extractLocation(msg);
-        if (!text && !location) continue; // تجاهل الأنواع الأخرى (صور/صوت...)
+        if (!text) continue; // نتعامل مع الرسائل النصية والأرقام فقط
 
         const phone = jid.split('@')[0];
 
         await sock.sendPresenceUpdate('composing', jid).catch(() => {});
 
-        const reply = await handleMessage(jid, phone, text, location);
+        const reply = await handleMessage(jid, phone, text);
 
         const replies = Array.isArray(reply) ? reply : [reply];
         for (const r of replies) {

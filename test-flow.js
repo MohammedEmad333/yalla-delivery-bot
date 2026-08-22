@@ -14,7 +14,7 @@ const rl = readline.createInterface({ input: process.stdin, output: process.stdo
 
 console.log('🧪 وضع اختبار يلا ديلفري (بلا واتساب). اكتب رسالتك ثم Enter. للخروج: /exit\n');
 console.log('جرّب مثلاً: مرحبا  ثم  1  ثم  1 ...');
-console.log('عند طلب الموقع، اكتب إحداثيات مثل: 31.95,35.91 (لمحاكاة مشاركة الموقع)\n');
+console.log('عند طلب الحي، اكتب رقم الحي من القائمة (مثل: 1 للرمال)\n');
 
 function ask() {
   rl.question('👤 أنت: ', async (line) => {
