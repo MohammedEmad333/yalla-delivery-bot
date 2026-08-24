@@ -60,21 +60,18 @@ const YALLA_ADMIN_PASSWORD = process.env.YALLA_ADMIN_PASSWORD || '';
 const APP_ANDROID_URL = process.env.APP_ANDROID_URL || 'https://play.google.com/store/apps/details?id=com.yalladelivery';
 const APP_IOS_URL = process.env.APP_IOS_URL || 'https://apps.apple.com/app/yalla-delivery';
 
-// ===== تسعير التوصيل (مطابق لتطبيق يلا ديلفري — Card 27) =====
-// النموذج: كل 160 متر = 1 شيكل. المسافة بين حي الاستلام وحي التسليم (Haversine)
-// مع معامل انحناء طرق 1.3، وحدّ أدنى 3 شيكل.
+// ===== تسعير التوصيل (مطابق لتطبيق يلا ديلفري — pricing.service.js) =====
+// النموذج الفعلي في الخادم: كل 250 متر = 1 شيكل، المسافة بين حي الاستلام
+// وحي التسليم (Haversine) × معامل انحناء طرق 1.3 (بدقة رقمين)، وحدّ أدنى 5 شيكل.
+// الخادم يعيد حساب السعر من الإحداثيات نفسها التي يرسلها البوت، فيتطابق التقدير.
 const CURRENCY = process.env.CURRENCY || '₪';
-const METERS_PER_SHEKEL = 160; // كل هذا القدر من الأمتار = 1 شيكل
+const METERS_PER_SHEKEL = 250; // كل هذا القدر من الأمتار = 1 شيكل (مطابق للتطبيق)
 const ROAD_FACTOR = 1.3;        // معامل تعويض انحناء الطرق مقابل الخط المستقيم
-const MIN_FARE = 3;             // أقل أجرة (يمنع سعراً صفرياً داخل الحي نفسه)
+const MIN_FARE = 5;             // أقل أجرة (مطابق للتطبيق)
 
 // ===== الوقت التقديري (ETA) حسب نوع المركبة — مطابق للتطبيق =====
 const VEHICLE_SPEEDS = { bicycle: 12, motorcycle: 25 }; // كم/ساعة داخل المدينة
 const PREP_MINUTES = 5; // وقت تجهيز/استلام ثابت (دقائق)
-const VEHICLE_TYPES = {
-  1: { key: 'bicycle', label: '🚲 دراجة هوائية' },
-  2: { key: 'motorcycle', label: '🏍️ دراجة نارية' },
-};
 
 // أحياء مدينة غزة — لكل حي إحداثيّة تمثيلية [lng, lat] قرب مركزه (مطابقة للتطبيق)
 const GAZA_NEIGHBORHOODS = [
@@ -148,25 +145,20 @@ function clearAuth() {
 // ==========================================================
 const STATES = {
   IDLE: 'IDLE',
-  AWAITING_SERVICE: 'AWAITING_SERVICE',
   AWAITING_NAME: 'AWAITING_NAME',
+  AWAITING_OWNER_PHONE: 'AWAITING_OWNER_PHONE', // رقم جوال صاحب الطلب
   // نقطة الاستلام (عنوان كامل مطابق للتطبيق)
   AWAITING_PICKUP_HOOD: 'AWAITING_PICKUP_HOOD',
   AWAITING_PICKUP_STREET: 'AWAITING_PICKUP_STREET',
   AWAITING_PICKUP_DETAILS: 'AWAITING_PICKUP_DETAILS',
   AWAITING_PICKUP_NOTE: 'AWAITING_PICKUP_NOTE',
-  AWAITING_PICKUP_CONTACT_NAME: 'AWAITING_PICKUP_CONTACT_NAME',
-  AWAITING_PICKUP_CONTACT_PHONE: 'AWAITING_PICKUP_CONTACT_PHONE',
   // نقطة التسليم (عنوان كامل مطابق للتطبيق)
   AWAITING_DROPOFF_HOOD: 'AWAITING_DROPOFF_HOOD',
   AWAITING_DROPOFF_STREET: 'AWAITING_DROPOFF_STREET',
   AWAITING_DROPOFF_DETAILS: 'AWAITING_DROPOFF_DETAILS',
   AWAITING_DROPOFF_NOTE: 'AWAITING_DROPOFF_NOTE',
-  AWAITING_DROPOFF_CONTACT_NAME: 'AWAITING_DROPOFF_CONTACT_NAME',
-  AWAITING_DROPOFF_CONTACT_PHONE: 'AWAITING_DROPOFF_CONTACT_PHONE',
-  // وصف الشحنة + المركبة
+  // وصف الشحنة
   AWAITING_PACKAGE_NOTE: 'AWAITING_PACKAGE_NOTE',
-  AWAITING_VEHICLE: 'AWAITING_VEHICLE',
   // الدفع (نظامنا الحالي: تحويل + إشعار)
   AWAITING_PAYMENT: 'AWAITING_PAYMENT',
   AWAITING_PAYMENT_PROOF: 'AWAITING_PAYMENT_PROOF',
@@ -175,28 +167,12 @@ const STATES = {
   CONFIRMATION: 'CONFIRMATION',
 };
 
-// أنواع الخدمة
-const SERVICE_TYPES = {
-  1: { key: 'food', label: '🍔 توصيل طعام' },
-  2: { key: 'parcel', label: '📦 توصيل طرود' },
-  3: { key: 'grocery', label: '🛒 توصيل بقالة/متاجر' },
-};
-
-// نصوص المطالبات حسب الخدمة (خطوة المصدر + التفاصيل)
-const SERVICE_PROMPTS = {
-  food: {
-    source: 'من أي *مطعم* تريد الطلب؟ 🍔 (اكتب اسم المطعم والفرع إن وُجد)',
-    details: 'ما الأصناف التي تريدها؟ 📝 (مثال: 2 برجر دجاج + بطاطس كبير + كولا)',
-  },
-  parcel: {
-    source: 'من أين *نستلم* الطرد؟ 📍 (عنوان الاستلام كاملاً)',
-    details: 'ما محتوى الطرد؟ 📦 (مثال: مستندات، ملابس، هدية صغيرة)',
-  },
-  grocery: {
-    source: 'من أي *متجر/بقالة* نشتري؟ 🛒 (اكتب اسم المتجر إن رغبت أو "أي متجر قريب")',
-    details: 'اكتب *قائمة المشتريات* المطلوبة 📝 (مثال: حليب 2، خبز، بيض، أرز 1كجم)',
-  },
-};
+// نوع خدمة واحد ثابت (أُزيل اختيار نوع الخدمة من المحادثة).
+const DEFAULT_SERVICE = { key: 'delivery', label: '🛵 خدمة توصيل' };
+// نوع مركبة افتراضي (أُزيل اختيار المركبة — يؤثّر على الوقت التقديري فقط).
+const DEFAULT_VEHICLE = { key: 'motorcycle', label: '🏍️ دراجة نارية' };
+// مطالبة وصف الشحنة (عامة بلا نوع خدمة).
+const PACKAGE_PROMPT = 'اكتب *تفاصيل الطلب / محتوى الشحنة* 📦 (مثال: مستندات، طعام، مشتريات، غرض...)';
 
 // طرق الدفع
 const PAYMENT_METHODS = {
@@ -248,17 +224,10 @@ const WELCOME_MESSAGE =
   '3️⃣ التحدث مع الدعم الفني 📞\n\n' +
   '💡 يمكنك كتابة "إلغاء" في أي وقت للعودة للبداية.';
 
-const SERVICE_MENU =
-  'اختر *نوع الخدمة* التي تريدها:\n\n' +
-  '1️⃣ 🍔 توصيل طعام من مطعم\n' +
-  '2️⃣ 📦 توصيل طرد/غرض\n' +
-  '3️⃣ 🛒 توصيل بقالة/مشتريات من متجر\n\n' +
-  'اكتب رقم الخدمة (1 / 2 / 3).';
-
 const PRICING_MESSAGE =
   '💰 *الأسعار*\n\n' +
   '• سعر التوصيل يُحسب *حسب المسافة* بين حي الاستلام وحي التسليم.\n' +
-  `• كل 160 متراً = 1 ${CURRENCY} تقريباً.\n` +
+  `• كل ${METERS_PER_SHEKEL} متراً = 1 ${CURRENCY} تقريباً.\n` +
   `• أقل سعر توصيل: ${MIN_FARE} ${CURRENCY}.\n\n` +
   'ابدأ طلباً واختر الحيّين لتعرف السعر التقريبي فوراً.\n' +
   'اكتب "طلب" لبدء طلب جديد، أو "إلغاء" للعودة للقائمة.';
@@ -283,12 +252,6 @@ const TIME_MENU =
   '1️⃣ في أسرع وقت (الآن)\n' +
   '2️⃣ وقت محدد لاحقاً\n\n' +
   'اكتب 1 للتوصيل الفوري، أو اكتب الوقت المطلوب مباشرة (مثال: الساعة 8 مساءً).';
-
-const VEHICLE_MENU =
-  'اختر *نوع المركبة* 🛵:\n\n' +
-  '1️⃣ 🚲 دراجة هوائية\n' +
-  '2️⃣ 🏍️ دراجة نارية\n\n' +
-  'اكتب رقم المركبة (1 / 2). يؤثّر على الوقت التقديري فقط.';
 
 // كلمات مفتاحية
 const GREETING_KEYWORDS = ['مرحبا', 'مرحباً', 'السلام عليكم', 'اهلا', 'أهلا', 'هلا', 'hi', 'hello', 'start', 'بدء', 'القائمة', 'menu'];
@@ -448,7 +411,7 @@ function toApiLocation(loc = {}) {
 function buildAdminOrderPayload(order) {
   const payload = {
     contactName: order.customerName,
-    contactPhone: order.whatsapp || order.dropoff?.contactPhone,
+    contactPhone: order.customerPhone || order.whatsapp,
     pickup: toApiLocation(order.pickup),
     dropoff: toApiLocation(order.dropoff),
     packageNote: order.packageNote,
@@ -519,7 +482,6 @@ function fmtLocation(loc) {
   const parts = [loc.neighborhood, loc.street, loc.details].filter(Boolean).join('، ');
   let s = parts;
   if (loc.note) s += `\n   📝 ملاحظة: ${loc.note}`;
-  s += `\n   👤 ${loc.contactName} — ${loc.contactPhone}`;
   return s;
 }
 
@@ -527,11 +489,11 @@ function buildSummary(o) {
   return (
     '📋 *ملخص طلبك:*\n\n' +
     `🔧 الخدمة: ${o.serviceLabel}\n` +
-    `👤 الاسم: ${o.customerName}\n\n` +
+    `👤 الاسم: ${o.customerName}\n` +
+    `📱 جوال صاحب الطلب: ${o.customerPhone}\n\n` +
     `📍 *الاستلام:*\n   ${fmtLocation(o.pickup)}\n\n` +
     `🎯 *التسليم:*\n   ${fmtLocation(o.dropoff)}\n\n` +
     `📦 الشحنة: ${o.packageNote}\n` +
-    `${o.vehicleLabel}\n` +
     `🚗 المسافة التقريبية: ${o.distanceKm} كم\n` +
     `⏱️ الوقت التقديري: ${o.etaMinutes} دقيقة\n` +
     `💵 سعر التوصيل التقريبي: ${o.deliveryPrice} ${CURRENCY}\n` +
@@ -574,9 +536,13 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
   switch (session.state) {
     case STATES.IDLE: {
       if (raw === '1' || includesAny(raw, NEW_ORDER_KEYWORDS)) {
-        session.state = STATES.AWAITING_SERVICE;
-        session.order = {};
-        return SERVICE_MENU;
+        // نوع خدمة واحد ثابت — نبدأ الطلب مباشرةً من الاسم.
+        session.order = {
+          serviceType: DEFAULT_SERVICE.key,
+          serviceLabel: DEFAULT_SERVICE.label,
+        };
+        session.state = STATES.AWAITING_NAME;
+        return '*الخطوة 1:* ما اسمك الكريم؟';
       }
       if (raw === '2' || includesAny(raw, ['اسعار', 'أسعار', 'سعر', 'مناطق', 'استفسار'])) {
         return PRICING_MESSAGE;
@@ -587,24 +553,21 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
       return WELCOME_MESSAGE;
     }
 
-    case STATES.AWAITING_SERVICE: {
-      const service = SERVICE_TYPES[raw];
-      if (!service) {
-        return 'من فضلك اختر رقماً صحيحاً:\n\n' + SERVICE_MENU;
-      }
-      session.order.serviceType = service.key;
-      session.order.serviceLabel = service.label;
-      session.state = STATES.AWAITING_NAME;
-      return `اخترت: ${service.label} ✅\n\n*الخطوة 1:* ما اسمك الكريم؟`;
-    }
-
     case STATES.AWAITING_NAME: {
       if (!raw) return 'من فضلك اكتب اسمك للمتابعة. 🙏';
       session.order.customerName = raw;
+      session.state = STATES.AWAITING_OWNER_PHONE;
+      return `تشرفنا يا ${raw} 🌟\n\n*رقم جوال صاحب الطلب* 📱`;
+    }
+
+    case STATES.AWAITING_OWNER_PHONE: {
+      const p = normPhone(raw);
+      if (!p) return 'الرقم غير واضح. اكتب رقم جوال صحيحاً 📱 (مثال: 059xxxxxxx).';
+      session.order.customerPhone = p;
       session.order.pickup = {};
       session.order.dropoff = {};
       session.state = STATES.AWAITING_PICKUP_HOOD;
-      return `تشرفنا يا ${raw} 🌟\n\nلنبدأ بعنوان *الاستلام* 📍\n\n*حي الاستلام:*\n${NEIGHBORHOOD_MENU}\n\nاكتب رقم الحي.`;
+      return `لنبدأ بعنوان *الاستلام* 📍\n\n*حي الاستلام:*\n${NEIGHBORHOOD_MENU}\n\nاكتب رقم الحي.`;
     }
 
     // ===== نقطة الاستلام =====
@@ -634,21 +597,6 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
 
     case STATES.AWAITING_PICKUP_NOTE: {
       session.order.pickup.note = isSkip(raw) ? '' : raw;
-      session.state = STATES.AWAITING_PICKUP_CONTACT_NAME;
-      return 'اسم *جهة الاتصال* عند الاستلام 👤 (مثلاً: اسم المطعم/المتجر/المرسِل)';
-    }
-
-    case STATES.AWAITING_PICKUP_CONTACT_NAME: {
-      if (!raw) return 'من فضلك اكتب اسم جهة الاتصال. 👤';
-      session.order.pickup.contactName = raw;
-      session.state = STATES.AWAITING_PICKUP_CONTACT_PHONE;
-      return 'رقم *جوال* جهة الاستلام 📱';
-    }
-
-    case STATES.AWAITING_PICKUP_CONTACT_PHONE: {
-      const p = normPhone(raw);
-      if (!p) return 'الرقم غير واضح. اكتب رقم جوال صحيحاً 📱 (مثال: 059xxxxxxx).';
-      session.order.pickup.contactPhone = p;
       session.state = STATES.AWAITING_DROPOFF_HOOD;
       return `✅ تم حفظ عنوان الاستلام.\n\nالآن عنوان *التسليم* 🎯\n\n*حي التسليم:*\n${NEIGHBORHOOD_MENU}\n\nاكتب رقم الحي.`;
     }
@@ -684,40 +632,18 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
 
     case STATES.AWAITING_DROPOFF_NOTE: {
       session.order.dropoff.note = isSkip(raw) ? '' : raw;
-      session.state = STATES.AWAITING_DROPOFF_CONTACT_NAME;
-      return 'اسم *جهة الاتصال* عند التسليم 👤 (اسم المستلِم)';
-    }
-
-    case STATES.AWAITING_DROPOFF_CONTACT_NAME: {
-      if (!raw) return 'من فضلك اكتب اسم المستلِم. 👤';
-      session.order.dropoff.contactName = raw;
-      session.state = STATES.AWAITING_DROPOFF_CONTACT_PHONE;
-      return 'رقم *جوال* المستلِم 📱';
-    }
-
-    case STATES.AWAITING_DROPOFF_CONTACT_PHONE: {
-      const p = normPhone(raw);
-      if (!p) return 'الرقم غير واضح. اكتب رقم جوال صحيحاً 📱 (مثال: 059xxxxxxx).';
-      session.order.dropoff.contactPhone = p;
       session.state = STATES.AWAITING_PACKAGE_NOTE;
-      const prompts = SERVICE_PROMPTS[session.order.serviceType];
-      return `✅ تم حفظ عنوان التسليم.\n\n*وصف الشحنة:* ${prompts.details}`;
+      return `✅ تم حفظ عنوان التسليم.\n\n*وصف الشحنة:* ${PACKAGE_PROMPT}`;
     }
 
-    // ===== وصف الشحنة + المركبة =====
+    // ===== وصف الشحنة =====
     case STATES.AWAITING_PACKAGE_NOTE: {
       if (!raw) return 'من فضلك اكتب وصف الشحنة/الطلب. 📦';
       session.order.packageNote = raw;
-      session.state = STATES.AWAITING_VEHICLE;
-      return VEHICLE_MENU;
-    }
-
-    case STATES.AWAITING_VEHICLE: {
-      const v = VEHICLE_TYPES[raw];
-      if (!v) return 'من فضلك اختر رقماً صحيحاً:\n\n' + VEHICLE_MENU;
-      session.order.vehicleType = v.key;
-      session.order.vehicleLabel = v.label;
-      session.order.etaMinutes = estimateEtaMinutes(session.order.distanceKm, v.key);
+      // مركبة افتراضية (بلا اختيار) — تؤثّر على الوقت التقديري فقط.
+      session.order.vehicleType = DEFAULT_VEHICLE.key;
+      session.order.vehicleLabel = DEFAULT_VEHICLE.label;
+      session.order.etaMinutes = estimateEtaMinutes(session.order.distanceKm, DEFAULT_VEHICLE.key);
       session.state = STATES.AWAITING_PAYMENT;
       return (
         '✅ تم حساب طلبك:\n\n' +
@@ -783,6 +709,7 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
           serviceType: s.serviceType,
           serviceLabel: s.serviceLabel,
           customerName: s.customerName,
+          customerPhone: s.customerPhone,
           pickup: s.pickup,
           dropoff: s.dropoff,
           packageNote: s.packageNote,
@@ -802,7 +729,7 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
         };
 
         saveOrder(order);
-        // إرسال الطلب للوحة الأدمن (Laravel) ليظهر جاهزاً للإسناد.
+        // إرسال الطلب إلى تطبيق Yalla ليظهر جاهزاً للإسناد.
         // لا نُفشل الطلب على العميل لو تعذّر الإرسال؛ يبقى محفوظاً محلياً.
         await pushOrderToAdmin(order);
         resetSession(jid);
