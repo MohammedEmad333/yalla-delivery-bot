@@ -50,15 +50,15 @@ const ORDERS_FILE = process.env.ORDERS_FILE || path.join(__dirname, 'orders.json
 
 // ===== الربط بتطبيق يلا ديلفري (Yalla API) لإنشاء الطلب جاهزاً للإسناد =====
 // عند تأكيد الطلب يُرسل إلى الـ API فيُنشأ طلب بحالة pending يظهر في لوحة
-// التحكم جاهزاً للإسناد لمندوب. البوت يصادق كأدمن عبر /auth/login ويخزّن
+// التحكم جاهزاً للإسناد لكابتن. البوت يصادق كأدمن عبر /auth/login ويخزّن
 // الـ JWT ويجدّده تلقائياً عند انتهائه (401).
 const YALLA_API_URL = (process.env.YALLA_API_URL || '').replace(/\/+$/, ''); // مثال: https://yalla-api-z6t0.onrender.com/api
 const YALLA_ADMIN_PHONE = process.env.YALLA_ADMIN_PHONE || '';
 const YALLA_ADMIN_PASSWORD = process.env.YALLA_ADMIN_PASSWORD || '';
 
 // روابط تحميل تطبيق يلا ديلفري (عدّلها لروابطك الحقيقية)
-const APP_ANDROID_URL = process.env.APP_ANDROID_URL || 'https://play.google.com/store/apps/details?id=com.yalladelivery';
-const APP_IOS_URL = process.env.APP_IOS_URL || 'https://apps.apple.com/app/yalla-delivery';
+const APP_ANDROID_URL = process.env.APP_ANDROID_URL || 'https://play.google.com/apps/testing/com.mohammedemad333.yalla';
+const APP_WEB_URL = process.env.APP_WEB_URL || 'https://yalla.mohammedelrefy28.workers.dev/';
 
 // ===== تسعير التوصيل (مطابق لتطبيق يلا ديلفري — pricing.service.js) =====
 // النموذج الفعلي في الخادم: كل 250 متر = 1 شيكل، المسافة بين حي الاستلام
@@ -213,7 +213,7 @@ function resetSession(jid) {
 const APP_DOWNLOAD_MESSAGE =
   '📲 *حمّل تطبيق يلا ديلفري* لتجربة أسرع وأسهل، وتتبّع طلبك مباشرةً وعروض حصرية:\n\n' +
   `🤖 أندرويد: ${APP_ANDROID_URL}\n` +
-  `🍏 آيفون: ${APP_IOS_URL}`;
+  `🌐 تطبيق الويب: ${APP_WEB_URL}`;
 
 const WELCOME_MESSAGE =
   'أهلاً بك في يلا ديلفري! 🛵 نصلك أينما كنت.\n\n' +
@@ -740,8 +740,8 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
           `🔐 كود التسليم: *${deliveryCode}*\n` +
           `💵 سعر التوصيل التقريبي: *${order.price} ${CURRENCY}*\n` +
           `⏱️ الوقت التقديري: *${order.etaMinutes} دقيقة*\n\n` +
-          '⚠️ احتفظ بـ*كود التسليم* وأعطه للمندوب عند استلامك الطلب لتأكيد التسليم.\n\n' +
-          'سيتواصل معك مندوبنا قريباً. يلا ديلفري 🛵💨\n\n' +
+          '⚠️ احتفظ بـ*كود التسليم* وأعطه للكابتن عند استلامك الطلب لتأكيد التسليم.\n\n' +
+          'سيتواصل معك الكابتن قريباً. يلا ديلفري 🛵💨\n\n' +
           APP_DOWNLOAD_MESSAGE +
           '\n\nاكتب "طلب" لإنشاء طلب جديد في أي وقت.'
         );

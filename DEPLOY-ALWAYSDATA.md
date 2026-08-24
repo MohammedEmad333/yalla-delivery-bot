@@ -38,7 +38,7 @@ USE_PAIRING_CODE = true
 BUSINESS_NUMBER  = 970593456405
 SUPPORT_NUMBER   = +970593456405
 APP_ANDROID_URL  = <رابط أندرويد الحقيقي>
-APP_IOS_URL      = <رابط آيفون الحقيقي>
+APP_WEB_URL      = <رابط تطبيق الويب>
 LOG_LEVEL        = warn
 ```
 
