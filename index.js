@@ -48,11 +48,13 @@ const PORT = process.env.PORT || 3000;
 const AUTH_FOLDER = process.env.AUTH_FOLDER || 'auth_info';
 const ORDERS_FILE = process.env.ORDERS_FILE || path.join(__dirname, 'orders.json');
 
-// ===== الربط بلوحة الأدمن (Laravel) لإنشاء الطلب جاهزاً للإسناد =====
-// عند تأكيد الطلب يُرسل إلى لوحة الأدمن فيظهر في صفحة الطلبات بحالة "قيد الانتظار"
-// (= جاهز للإسناد). التوكن يطابق BOT_API_TOKEN في .env الخاص بلارافيل.
-const ADMIN_API_URL = process.env.ADMIN_API_URL || ''; // مثال: https://yourdomain.com/api/bot/orders
-const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || '';
+// ===== الربط بتطبيق يلا ديلفري (Yalla API) لإنشاء الطلب جاهزاً للإسناد =====
+// عند تأكيد الطلب يُرسل إلى الـ API فيُنشأ طلب بحالة pending يظهر في لوحة
+// التحكم جاهزاً للإسناد لمندوب. البوت يصادق كأدمن عبر /auth/login ويخزّن
+// الـ JWT ويجدّده تلقائياً عند انتهائه (401).
+const YALLA_API_URL = (process.env.YALLA_API_URL || '').replace(/\/+$/, ''); // مثال: https://yalla-api-z6t0.onrender.com/api
+const YALLA_ADMIN_PHONE = process.env.YALLA_ADMIN_PHONE || '';
+const YALLA_ADMIN_PASSWORD = process.env.YALLA_ADMIN_PASSWORD || '';
 
 // روابط تحميل تطبيق يلا ديلفري (عدّلها لروابطك الحقيقية)
 const APP_ANDROID_URL = process.env.APP_ANDROID_URL || 'https://play.google.com/store/apps/details?id=com.yalladelivery';
@@ -393,56 +395,119 @@ function saveOrder(order) {
 }
 
 // ==========================================================
-//  إرسال الطلب إلى لوحة الأدمن (Laravel) — يظهر جاهزاً للإسناد
+//  إرسال الطلب إلى تطبيق يلا ديلفري (Yalla API) — يظهر جاهزاً للإسناد
 // ==========================================================
+// توكن أدمن مخزّن مؤقتاً (JWT). يُجدَّد بالدخول عند غيابه أو انتهائه (401).
+let _adminToken = null;
+
+// fetch مع مهلة زمنية (Render المجاني قد يستيقظ ببطء بعد خمول).
+async function fetchWithTimeout(url, options = {}, ms = 60000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), ms);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// تسجيل دخول الأدمن للحصول على JWT (POST /auth/login بـ phone+password).
+async function loginYalla() {
+  const res = await fetchWithTimeout(`${YALLA_API_URL}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    body: JSON.stringify({ phone: YALLA_ADMIN_PHONE, password: YALLA_ADMIN_PASSWORD }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || !body.token) {
+    throw new Error(`login failed (${res.status}): ${body?.message || 'no token'}`);
+  }
+  _adminToken = body.token;
+  console.log(`🔐 تسجيل دخول الأدمن ناجح (role: ${body.user?.role || '?'}).`);
+  return _adminToken;
+}
+
+// تحويل نقطة عنوان من صيغة البوت إلى الصيغة التي يتوقّعها الـ API.
+function toApiLocation(loc = {}) {
+  const out = {
+    neighborhood: loc.neighborhood,
+    street: loc.street,
+    details: loc.details,
+    note: loc.note || '',
+    contactName: loc.contactName,
+    contactPhone: loc.contactPhone,
+  };
+  // الإحداثيات مخزّنة بصيغة [lng, lat] — مطابقة لصيغة GeoJSON Point.
+  if (Array.isArray(loc.coordinates) && loc.coordinates.length === 2) {
+    out.location = { type: 'Point', coordinates: loc.coordinates };
+  }
+  return out;
+}
+
+// بناء حمولة POST /orders/admin من طلب البوت.
+function buildAdminOrderPayload(order) {
+  const payload = {
+    contactName: order.customerName,
+    contactPhone: order.whatsapp || order.dropoff?.contactPhone,
+    pickup: toApiLocation(order.pickup),
+    dropoff: toApiLocation(order.dropoff),
+    packageNote: order.packageNote,
+    vehicleType: order.vehicleType, // 'bicycle' | 'motorcycle'
+  };
+
+  // الجدولة: نرسل scheduledAt فقط لو تاريخ صالح؛ وإلا نُبقي نص الوقت المطلوب
+  // ضمن ملاحظة الشحنة حتى لا يضيع (البوت يخزّنه أحياناً كنص حرّ).
+  const sched = order.scheduledAt;
+  if (sched && !Number.isNaN(Date.parse(sched))) {
+    payload.scheduledAt = new Date(sched).toISOString();
+  } else if (sched) {
+    payload.packageNote = `${payload.packageNote || ''}\n⏰ وقت مطلوب: ${sched}`.trim();
+  }
+  return payload;
+}
+
+// يرسل الطلب للـ API؛ يعيد المحاولة مرة واحدة بعد إعادة الدخول عند 401.
 async function pushOrderToAdmin(order) {
-  if (!ADMIN_API_URL || !ADMIN_API_TOKEN) {
-    console.log('ℹ️ لم يُضبط ADMIN_API_URL/ADMIN_API_TOKEN — تم تخطي الإرسال للأدمن (حُفظ محلياً فقط).');
+  if (!YALLA_API_URL || !YALLA_ADMIN_PHONE || !YALLA_ADMIN_PASSWORD) {
+    console.log('ℹ️ لم تُضبط إعدادات Yalla (YALLA_API_URL/PHONE/PASSWORD) — تم تخطي الإرسال (حُفظ محلياً فقط).');
     return { ok: false, skipped: true };
   }
 
-  const payload = {
-    ref: order.ref,
-    customer_name: order.customerName,
-    whatsapp: order.whatsapp,
-    service_label: order.serviceLabel,
-    price: order.price,
-    currency: order.currency,
-    distance_km: order.distanceKm,
-    eta_minutes: order.etaMinutes,
-    delivery_code: order.deliveryCode,
-    payment_method: order.paymentMethod,
-    delivery_time: order.deliveryTime,
-    pickup: order.pickup,
-    dropoff: order.dropoff,
-    package_note: order.packageNote,
-    vehicle_label: order.vehicleLabel,
-  };
+  const payload = buildAdminOrderPayload(order);
 
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000);
-    const res = await fetch(ADMIN_API_URL, {
+  const attempt = async () => {
+    if (!_adminToken) await loginYalla();
+    return fetchWithTimeout(`${YALLA_API_URL}/orders/admin`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json',
-        'X-Bot-Token': ADMIN_API_TOKEN,
+        Authorization: `Bearer ${_adminToken}`,
+        // مفتاح عدم التكرار: يمنع ازدواج الطلب لو أُعيدت المحاولة.
+        'Idempotency-Key': order.ref,
       },
       body: JSON.stringify(payload),
-      signal: controller.signal,
     });
-    clearTimeout(timeout);
+  };
+
+  try {
+    let res = await attempt();
+    // التوكن منتهٍ/غير صالح → أعد الدخول وحاول مرة أخرى.
+    if (res.status === 401) {
+      _adminToken = null;
+      res = await attempt();
+    }
 
     const body = await res.json().catch(() => ({}));
     if (res.ok) {
-      console.log(`✅ أُنشئ الطلب في لوحة الأدمن (order_id: ${body.order_id ?? '?'}) جاهزاً للإسناد.`);
-      return { ok: true, orderId: body.order_id };
+      const id = body?._id || body?.id || body?.order?._id || '?';
+      console.log(`✅ أُنشئ الطلب في تطبيق Yalla (id: ${id}) جاهزاً للإسناد.`);
+      return { ok: true, orderId: id };
     }
-    console.error(`⚠️ رفضت لوحة الأدمن الطلب (${res.status}):`, body?.message || '');
+    console.error(`⚠️ رفض الـ API الطلب (${res.status}):`, body?.message || JSON.stringify(body).slice(0, 200));
     return { ok: false, status: res.status, error: body?.message };
   } catch (err) {
-    console.error('⚠️ فشل إرسال الطلب للوحة الأدمن:', err?.message || err);
+    console.error('⚠️ فشل إرسال الطلب لتطبيق Yalla:', err?.message || err);
     return { ok: false, error: err?.message };
   }
 }
