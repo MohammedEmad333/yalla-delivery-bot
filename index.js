@@ -29,12 +29,30 @@ const {
   makeCacheableSignalKeyStore,
 } = require('@whiskeysockets/baileys');
 
+// تحميل متغيّرات البيئة من ملف .env إن وُجد (ميزة أصلية في Node ≥ 20.6،
+// بلا أي مكتبة خارجية). على الاستضافة تُضبط المتغيّرات من لوحة التحكم مباشرةً،
+// فلا يضرّ غياب الملف.
+try {
+  const envPath = path.join(__dirname, '.env');
+  if (typeof process.loadEnvFile === 'function' && fs.existsSync(envPath)) {
+    process.loadEnvFile(envPath);
+  }
+} catch (e) {
+  console.error('⚠️ تعذّر تحميل ملف .env:', e?.message || e);
+}
+
 // ==========================================================
 //  الإعدادات العامة
 // ==========================================================
 const PORT = process.env.PORT || 3000;
 const AUTH_FOLDER = process.env.AUTH_FOLDER || 'auth_info';
 const ORDERS_FILE = process.env.ORDERS_FILE || path.join(__dirname, 'orders.json');
+
+// ===== الربط بلوحة الأدمن (Laravel) لإنشاء الطلب جاهزاً للإسناد =====
+// عند تأكيد الطلب يُرسل إلى لوحة الأدمن فيظهر في صفحة الطلبات بحالة "قيد الانتظار"
+// (= جاهز للإسناد). التوكن يطابق BOT_API_TOKEN في .env الخاص بلارافيل.
+const ADMIN_API_URL = process.env.ADMIN_API_URL || ''; // مثال: https://yourdomain.com/api/bot/orders
+const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN || '';
 
 // روابط تحميل تطبيق يلا ديلفري (عدّلها لروابطك الحقيقية)
 const APP_ANDROID_URL = process.env.APP_ANDROID_URL || 'https://play.google.com/store/apps/details?id=com.yalladelivery';
@@ -375,6 +393,61 @@ function saveOrder(order) {
 }
 
 // ==========================================================
+//  إرسال الطلب إلى لوحة الأدمن (Laravel) — يظهر جاهزاً للإسناد
+// ==========================================================
+async function pushOrderToAdmin(order) {
+  if (!ADMIN_API_URL || !ADMIN_API_TOKEN) {
+    console.log('ℹ️ لم يُضبط ADMIN_API_URL/ADMIN_API_TOKEN — تم تخطي الإرسال للأدمن (حُفظ محلياً فقط).');
+    return { ok: false, skipped: true };
+  }
+
+  const payload = {
+    ref: order.ref,
+    customer_name: order.customerName,
+    whatsapp: order.whatsapp,
+    service_label: order.serviceLabel,
+    price: order.price,
+    currency: order.currency,
+    distance_km: order.distanceKm,
+    eta_minutes: order.etaMinutes,
+    delivery_code: order.deliveryCode,
+    payment_method: order.paymentMethod,
+    delivery_time: order.deliveryTime,
+    pickup: order.pickup,
+    dropoff: order.dropoff,
+    package_note: order.packageNote,
+    vehicle_label: order.vehicleLabel,
+  };
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    const res = await fetch(ADMIN_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        'X-Bot-Token': ADMIN_API_TOKEN,
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    const body = await res.json().catch(() => ({}));
+    if (res.ok) {
+      console.log(`✅ أُنشئ الطلب في لوحة الأدمن (order_id: ${body.order_id ?? '?'}) جاهزاً للإسناد.`);
+      return { ok: true, orderId: body.order_id };
+    }
+    console.error(`⚠️ رفضت لوحة الأدمن الطلب (${res.status}):`, body?.message || '');
+    return { ok: false, status: res.status, error: body?.message };
+  } catch (err) {
+    console.error('⚠️ فشل إرسال الطلب للوحة الأدمن:', err?.message || err);
+    return { ok: false, error: err?.message };
+  }
+}
+
+// ==========================================================
 //  منطق المحادثة
 // ==========================================================
 function fmtLocation(loc) {
@@ -664,6 +737,9 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
         };
 
         saveOrder(order);
+        // إرسال الطلب للوحة الأدمن (Laravel) ليظهر جاهزاً للإسناد.
+        // لا نُفشل الطلب على العميل لو تعذّر الإرسال؛ يبقى محفوظاً محلياً.
+        await pushOrderToAdmin(order);
         resetSession(jid);
 
         return (
