@@ -58,6 +58,21 @@ node -v && npm -v      # تأكّد أن الإصدار ≥ 18
 
 ---
 
+## 3.5) ⚠️ مهم على E2.1.Micro (1 GB RAM): أنشئ ملف Swap
+
+ذاكرة الميكرو 1 GB فقط، وقد يقتل النظام عملية Node عند الضغط (سبب توقّف صامت).
+ملف swap بحجم 2 GB يمنع ذلك:
+```bash
+sudo fallocate -l 2G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+free -h        # تأكّد أن Swap أصبح 2.0Gi
+```
+
+---
+
 ## 4) سحب الكود وتثبيت الحزم
 
 ```bash
