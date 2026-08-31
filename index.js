@@ -45,8 +45,12 @@ try {
 //  الإعدادات العامة
 // ==========================================================
 const PORT = process.env.PORT || 3000;
-const AUTH_FOLDER = process.env.AUTH_FOLDER || 'auth_info';
-const ORDERS_FILE = process.env.ORDERS_FILE || path.join(__dirname, 'orders.json');
+// نثبّت مسار جلسة الواتساب على مسار مطلق مرتبط بمجلد المشروع، حتى لا تُفقد
+// الجلسة إذا شغّل systemd العملية من دليل عمل مختلف (سبب شائع لطلب ربط جديد).
+const AUTH_FOLDER = path.resolve(__dirname, process.env.AUTH_FOLDER || 'auth_info');
+const ORDERS_FILE = process.env.ORDERS_FILE
+  ? path.resolve(__dirname, process.env.ORDERS_FILE)
+  : path.join(__dirname, 'orders.json');
 
 // ===== الربط بتطبيق يلا ديلفري (Yalla API) لإنشاء الطلب جاهزاً للإسناد =====
 // عند تأكيد الطلب يُرسل إلى الـ API فيُنشأ طلب بحالة pending يظهر في لوحة

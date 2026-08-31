@@ -31,6 +31,8 @@ npm start
 - `/` حالة الخدمة — `/health` فحص صحة — `/qr` عرض QR — `/orders` عرض الطلبات.
 
 ## النشر
-جاهز للرفع على Render أو Alwaysdata (Build: `npm install` / Start: `npm start`).
+- **Oracle Cloud (Always Free) — موصى به للتشغيل 24/7:** دليل كامل خطوة بخطوة مع
+  systemd وإعادة تشغيل تلقائية وجلسة دائمة في [`DEPLOY-ORACLE.md`](DEPLOY-ORACLE.md).
+- Render أو Alwaysdata: جاهز للرفع (Build: `npm install` / Start: `npm start`).
 
-> ملاحظة: على الاستضافات ذات القرص المؤقت قد يُمسح `auth_info` و`orders.json` عند إعادة النشر — استخدم قرصاً دائماً للحفاظ على الجلسة.
+> ملاحظة: على الاستضافات ذات القرص المؤقت قد يُمسح `auth_info` و`orders.json` عند إعادة النشر — استخدم قرصاً دائماً للحفاظ على الجلسة. على Oracle القرص دائم افتراضياً.
