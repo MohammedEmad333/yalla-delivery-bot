@@ -33,26 +33,41 @@
    **Assign a public IPv4 address = Yes**.
 6. اضغط **Create** وانتظر حتى تصبح الحالة **Running**، وانسخ **Public IP address**.
 
+> ⚠️ **مهم — اسم المستخدم ومدير الحزم يختلفان حسب نظام التشغيل:**
+> | النظام | مستخدم SSH | مدير الحزم |
+> |--------|-----------|-----------|
+> | **Ubuntu** | `ubuntu` | `apt` |
+> | **Oracle Linux 9** (الصورة الافتراضية) | `opc` | `dnf` |
+> اختر القسم المطابق لصورتك في الخطوات أدناه.
+
 ---
 
 ## 2) الاتصال بالخادم عبر SSH
 
-من جهازك (استبدل المسار والـ IP):
+من جهازك (استبدل المسار والـ IP، واسم المستخدم `ubuntu` أو `opc` حسب صورتك):
 ```bash
 chmod 400 ~/Downloads/ssh-key-*.key
-ssh -i ~/Downloads/ssh-key-*.key ubuntu@<PUBLIC_IP>
+ssh -i ~/Downloads/ssh-key-*.key ubuntu@<PUBLIC_IP>    # Ubuntu
+ssh -i ~/Downloads/ssh-key-*.key opc@<PUBLIC_IP>       # Oracle Linux
 ```
-> مستخدم Ubuntu على Oracle اسمه دائماً **`ubuntu`**.
 
 ---
 
 ## 3) تثبيت Node.js و git
 
+**على Ubuntu:**
 ```bash
 sudo apt update && sudo apt -y upgrade
-# Node.js 20 LTS من NodeSource
 curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
 sudo apt -y install nodejs git
+node -v && npm -v      # تأكّد أن الإصدار ≥ 18
+```
+
+**على Oracle Linux 9:**
+```bash
+sudo dnf -y update
+curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
+sudo dnf install -y nodejs git
 node -v && npm -v      # تأكّد أن الإصدار ≥ 18
 ```
 
@@ -120,9 +135,20 @@ node index.js
 
 ## 7) التشغيل الدائم 24/7 عبر systemd
 
-انسخ وحدة الخدمة الجاهزة في المستودع، وفعّلها:
+انسخ وحدة الخدمة الجاهزة في المستودع، وفعّلها. وحدة الخدمة مضبوطة للمستخدم
+`ubuntu`؛ **على Oracle Linux استخدم أمر `sed` الذي يبدّلها تلقائياً إلى `opc`**:
+
+**على Ubuntu:**
 ```bash
 sudo cp ~/yalla-delivery-bot/deploy/yalla-bot.service /etc/systemd/system/yalla-bot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now yalla-bot
+```
+
+**على Oracle Linux (يبدّل `ubuntu`→`opc` في المستخدم والمسارات):**
+```bash
+sudo sed 's/ubuntu/opc/g' ~/yalla-delivery-bot/deploy/yalla-bot.service \
+  | sudo tee /etc/systemd/system/yalla-bot.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now yalla-bot
 ```
