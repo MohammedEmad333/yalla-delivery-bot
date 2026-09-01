@@ -11,7 +11,7 @@
  *  - إعادة اتصال تلقائي (Auto Reconnect) عبر DisconnectReason
  *  - آلة حالات في الذاكرة لكل رقم (In-Memory State Machine)
  *  - أوامر إلغاء/تراجع للعودة إلى IDLE
- *  - سيرفر express لإبقاء الاستضافة نشطة (Render/Alwaysdata) + عرض QR على الويب
+ *  - سيرفر express لإبقاء الاستضافة نشطة (Oracle Cloud) + عرض QR على الويب
  *  - بوت مستقل: يحفظ الطلبات محلياً في orders.json (بلا أي API خارجي)
  */
 
@@ -377,7 +377,7 @@ function saveOrder(order) {
 // توكن أدمن مخزّن مؤقتاً (JWT). يُجدَّد بالدخول عند غيابه أو انتهائه (401).
 let _adminToken = null;
 
-// fetch مع مهلة زمنية (Render المجاني قد يستيقظ ببطء بعد خمول).
+// fetch مع مهلة زمنية (قد يستيقظ خادم الـ API ببطء بعد خمول).
 async function fetchWithTimeout(url, options = {}, ms = 60000) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), ms);
