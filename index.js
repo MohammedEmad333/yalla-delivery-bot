@@ -107,6 +107,16 @@ const USE_PAIRING_CODE = String(process.env.USE_PAIRING_CODE || 'true').toLowerC
 // رقم واتساب الأعمال: +970593456405  (بصيغة دولية بدون علامة +)
 const BUSINESS_NUMBER = (process.env.BUSINESS_NUMBER || '970593456405').replace(/\D/g, '');
 
+// ===== المساعد الذكي (Google Gemini — مجاني) =====
+// عند تعذّر تطابق رسالة العميل مع أمر معروف، تُحال إلى المساعد الذكي ليجيب
+// بلغة طبيعية عن الأسئلة العامة ويوجّه العميل لإنشاء طلب. مجاني عبر مفتاح من
+// https://aistudio.google.com/apikey — فعّله بضبط GEMINI_API_KEY.
+const AI_ENABLED = String(process.env.AI_ENABLED ?? 'true').toLowerCase() === 'true';
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+// أقصى عدد من الرسائل (سؤال+جواب) نحتفظ به لكل عميل لسياق المحادثة.
+const AI_MEMORY_TURNS = Math.max(0, parseInt(process.env.AI_MEMORY_TURNS || '6', 10) || 0);
+
 const logger = pino({ level: process.env.LOG_LEVEL || 'warn' });
 
 // حواجز أمان: لا يتوقف البوت بسبب خطأ عابر
@@ -522,6 +532,96 @@ function isSkip(raw) {
 /**
  * يعالج رسالة نصية واردة ويعيد نص الرد (أو مصفوفة ردود).
  */
+// ==========================================================
+//  المساعد الذكي (Google Gemini)
+// ==========================================================
+// تعليمات النظام: تعرّف المساعد كموظف خدمة عملاء ليلا ديلفري، وتزوّده
+// بالحقائق (الأسعار، المناطق، خطوات الطلب) ليجيب بدقة ولا يخترع معلومات.
+function buildAISystemPrompt() {
+  return [
+    'أنت "مساعد يلا ديلفري" الذكي، موظف خدمة عملاء ودود لخدمة توصيل في مدينة غزة.',
+    'ردّ دائماً باللغة العربية (باللهجة التي يكتب بها العميل)، وبإيجاز ووضوح، واستخدم إيموجي باعتدال.',
+    '',
+    'معلومات الخدمة التي يجب أن تعتمد عليها فقط (لا تخترع معلومات غير مذكورة):',
+    `- سعر التوصيل يُحسب حسب المسافة: كل ${METERS_PER_SHEKEL} متر ≈ 1 ${CURRENCY}، وأقل أجرة ${MIN_FARE} ${CURRENCY}.`,
+    '- السعر الدقيق يظهر تلقائياً بعد اختيار حي الاستلام وحي التسليم أثناء الطلب.',
+    `- المناطق المخدومة (أحياء غزة): ${GAZA_NEIGHBORHOODS.map((n) => n.name).join('، ')}.`,
+    '- طرق الدفع: بنك فلسطين، محفظة بال بي، جوال بي (يُطلب إشعار الحوالة بعد التحويل).',
+    '- أوقات عمل الدعم: يومياً 9 صباحاً حتى 11 مساءً.',
+    `- رقم الدعم للتواصل المباشر: ${SUPPORT_NUMBER}.`,
+    `- روابط التطبيق — أندرويد: ${APP_ANDROID_URL} | الويب: ${APP_WEB_URL}.`,
+    '',
+    'خطوات إنشاء الطلب داخل هذا البوت (وجّه العميل إليها عند الحاجة):',
+    'الاسم ← جوال صاحب الطلب ← عنوان الاستلام (حي/شارع/تفاصيل) ← عنوان التسليم ← وصف الشحنة ← الدفع ← وقت التوصيل ← تأكيد.',
+    '',
+    'قواعد مهمة:',
+    '- لبدء طلب فعلي، وجّه العميل لكتابة كلمة "طلب" بالضبط (أنت لا تستطيع إنشاء الطلب بنفسك).',
+    '- إذا سُئلت عن أمر خارج نطاق الخدمة أو لا تعرف إجابته، اعتذر بلطف واقترح التواصل مع الدعم أو كتابة "طلب".',
+    '- لا تَعِد بأسعار أو أوقات محددة رقمياً؛ اذكر أن السعر التقريبي يظهر بعد اختيار الحيّين.',
+    '- اجعل الرد قصيراً (بضعة أسطر) ومناسباً لمحادثة واتساب.',
+  ].join('\n');
+}
+
+// ذاكرة محادثة قصيرة لكل عميل (للسياق فقط) — لا تُحفظ على القرص.
+function pushAIHistory(session, role, text) {
+  if (!AI_MEMORY_TURNS) return;
+  if (!Array.isArray(session.aiHistory)) session.aiHistory = [];
+  session.aiHistory.push({ role, parts: [{ text }] });
+  // نُبقي آخر (AI_MEMORY_TURNS × 2) رسالة كحدّ أقصى.
+  const max = AI_MEMORY_TURNS * 2;
+  if (session.aiHistory.length > max) {
+    session.aiHistory = session.aiHistory.slice(-max);
+  }
+}
+
+// استدعاء Gemini والحصول على ردّ نصي. يرجّع null عند أي فشل ليعود البوت
+// لسلوكه الافتراضي (رسالة الترحيب) بلا أعطال.
+async function askAI(session, userText) {
+  if (!AI_ENABLED || !GEMINI_API_KEY) return null;
+  const prompt = (userText || '').trim();
+  if (!prompt) return null;
+
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent` +
+    `?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+
+  const history = Array.isArray(session.aiHistory) ? session.aiHistory : [];
+  const body = {
+    systemInstruction: { parts: [{ text: buildAISystemPrompt() }] },
+    contents: [...history, { role: 'user', parts: [{ text: prompt }] }],
+    generationConfig: { temperature: 0.6, maxOutputTokens: 512 },
+  };
+
+  try {
+    const res = await fetchWithTimeout(
+      url,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+      20000,
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      console.error(`⚠️ Gemini API خطأ (${res.status}):`, data?.error?.message || '');
+      return null;
+    }
+    const reply = data?.candidates?.[0]?.content?.parts
+      ?.map((p) => p?.text || '')
+      .join('')
+      .trim();
+    if (!reply) return null;
+
+    pushAIHistory(session, 'user', prompt);
+    pushAIHistory(session, 'model', reply);
+    return reply;
+  } catch (err) {
+    console.error('⚠️ تعذّر الاتصال بالمساعد الذكي:', err?.message || err);
+    return null;
+  }
+}
+
 async function handleMessage(jid, phone, text, hasMedia = false) {
   const session = getSession(jid);
   const raw = (text || '').trim();
@@ -553,6 +653,16 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
       }
       if (raw === '3' || includesAny(raw, ['دعم', 'مساعدة', 'مساعده', 'support'])) {
         return SUPPORT_MESSAGE;
+      }
+      // التحية والقوائم الفارغة → رسالة الترحيب مباشرةً (بلا استهلاك للمساعد الذكي).
+      if (!raw || includesAny(raw, GREETING_KEYWORDS)) {
+        return WELCOME_MESSAGE;
+      }
+      // أي كلام حر آخر → المساعد الذكي يجيب بلغة طبيعية، ثم نلحق تلميحاً للطلب.
+      // عند تعطّل المساعد أو غياب المفتاح نعود لرسالة الترحيب تلقائياً.
+      const aiReply = await askAI(session, raw);
+      if (aiReply) {
+        return aiReply + '\n\n💡 اكتب "طلب" لبدء طلب توصيل جديد.';
       }
       return WELCOME_MESSAGE;
     }
