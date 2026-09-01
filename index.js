@@ -270,9 +270,14 @@ const TIME_MENU =
 // كلمات مفتاحية
 const GREETING_KEYWORDS = ['مرحبا', 'مرحباً', 'السلام عليكم', 'اهلا', 'أهلا', 'هلا', 'hi', 'hello', 'start', 'بدء', 'القائمة', 'menu'];
 const NEW_ORDER_KEYWORDS = ['طلب', 'طلب جديد', 'توصيل'];
+const PRICING_KEYWORDS = ['اسعار', 'أسعار', 'سعر', 'مناطق', 'استفسار'];
+const SUPPORT_KEYWORDS = ['دعم', 'مساعدة', 'مساعده', 'support'];
 const CANCEL_KEYWORDS = ['إلغاء', 'الغاء', 'تراجع', 'cancel', 'رجوع', 'خروج'];
 const YES_KEYWORDS = ['نعم', 'اكيد', 'أكيد', 'تأكيد', 'تاكيد', 'موافق', 'ok', 'yes', 'y'];
 const NO_KEYWORDS = ['لا', 'الغاء', 'إلغاء', 'no', 'n'];
+// كلمات استفهام: عند ظهورها نعامل الرسالة كسؤال ونحيلها للمساعد الذكي، بدل
+// التقاطها بالخطأ كأمر (مثال: "كم سعر التوصيل" سؤال وليس طلباً جديداً).
+const QUESTION_WORDS = ['كم', 'بكم', 'كيف', 'وين', 'فين', 'اين', 'أين', 'متى', 'امتى', 'إمتى', 'ليش', 'ليه', 'لماذا', 'هل', 'شو', 'ايش', 'إيش', 'ايه', 'وش'];
 
 function normalize(text) {
   return (text || '').trim().toLowerCase();
@@ -281,6 +286,18 @@ function normalize(text) {
 function includesAny(text, list) {
   const t = normalize(text);
   return list.some((k) => t === normalize(k) || t.includes(normalize(k)));
+}
+
+// هل الرسالة سؤال؟ (تحوي "؟" أو كلمة استفهام ككلمة مستقلة). نستخدمها لتوجيه
+// الأسئلة للمساعد الذكي بدل التقاطها كأمر بسبب كلمة مشتركة مثل "توصيل"/"سعر".
+function looksLikeQuestion(text) {
+  const t = normalize(text);
+  if (!t) return false;
+  if (t.includes('؟') || t.includes('?')) return true;
+  return QUESTION_WORDS.some((w) => {
+    const k = normalize(w);
+    return t === k || t.startsWith(k + ' ') || t.endsWith(' ' + k) || t.includes(' ' + k + ' ');
+  });
 }
 
 function generateOrderRef() {
@@ -639,7 +656,14 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
 
   switch (session.state) {
     case STATES.IDLE: {
-      if (raw === '1' || includesAny(raw, NEW_ORDER_KEYWORDS)) {
+      // الأرقام أوامر صريحة دائماً. أما الكلمات المفتاحية فلا نلتقطها إن كانت
+      // الرسالة سؤالاً (مثال: "كم سعر التوصيل") حتى تصل للمساعد الذكي.
+      const isQuestion = looksLikeQuestion(raw);
+      const wantsOrder = raw === '1' || (!isQuestion && includesAny(raw, NEW_ORDER_KEYWORDS));
+      const wantsPricing = raw === '2' || (!isQuestion && includesAny(raw, PRICING_KEYWORDS));
+      const wantsSupport = raw === '3' || (!isQuestion && includesAny(raw, SUPPORT_KEYWORDS));
+
+      if (wantsOrder) {
         // نوع خدمة واحد ثابت — نبدأ الطلب مباشرةً من الاسم.
         session.order = {
           serviceType: DEFAULT_SERVICE.key,
@@ -648,22 +672,23 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
         session.state = STATES.AWAITING_NAME;
         return '*الخطوة 1:* ما اسمك الكريم؟';
       }
-      if (raw === '2' || includesAny(raw, ['اسعار', 'أسعار', 'سعر', 'مناطق', 'استفسار'])) {
-        return PRICING_MESSAGE;
-      }
-      if (raw === '3' || includesAny(raw, ['دعم', 'مساعدة', 'مساعده', 'support'])) {
-        return SUPPORT_MESSAGE;
-      }
+      if (wantsPricing) return PRICING_MESSAGE;
+      if (wantsSupport) return SUPPORT_MESSAGE;
+
       // التحية والقوائم الفارغة → رسالة الترحيب مباشرةً (بلا استهلاك للمساعد الذكي).
       if (!raw || includesAny(raw, GREETING_KEYWORDS)) {
         return WELCOME_MESSAGE;
       }
-      // أي كلام حر آخر → المساعد الذكي يجيب بلغة طبيعية، ثم نلحق تلميحاً للطلب.
-      // عند تعطّل المساعد أو غياب المفتاح نعود لرسالة الترحيب تلقائياً.
+
+      // سؤال/كلام حر → المساعد الذكي يجيب بلغة طبيعية ثم نلحق تلميحاً للطلب.
       const aiReply = await askAI(session, raw);
       if (aiReply) {
         return aiReply + '\n\n💡 اكتب "طلب" لبدء طلب توصيل جديد.';
       }
+
+      // احتياطي عند تعذّر المساعد (غياب المفتاح/انقطاع): وجّه حسب أقرب نيّة.
+      if (includesAny(raw, PRICING_KEYWORDS)) return PRICING_MESSAGE;
+      if (includesAny(raw, SUPPORT_KEYWORDS)) return SUPPORT_MESSAGE;
       return WELCOME_MESSAGE;
     }
 
