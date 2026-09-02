@@ -121,7 +121,9 @@ const GEMINI_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || 'gemini-1.5-f
 // مفيد إذا كانت مفاتيح Gemini مقيّدة بسياسة مؤسسة (تُصدَر بصيغة AQ. غير مدعومة).
 // احصل على مفتاح مجاني من: https://console.groq.com/keys
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
-const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'openai/gpt-oss-20b';
+// نموذج Groq احتياطي يُجرَّب تلقائياً إذا كان الأساسي غير متاح (404).
+const GROQ_FALLBACK_MODEL = process.env.GROQ_FALLBACK_MODEL || 'openai/gpt-oss-120b';
 // اختيار المزوّد: 'gemini' | 'groq' | 'auto' (الافتراضي: يختار أول مفتاح متوفّر).
 const AI_PROVIDER = String(process.env.AI_PROVIDER || 'auto').toLowerCase();
 
@@ -147,6 +149,7 @@ const aiStats = {
   lastError: null,
   lastErrorAt: null,
   activeModel: GEMINI_MODEL, // نموذج Gemini النشط (قد يتحوّل للاحتياطي تلقائياً)
+  activeGroqModel: GROQ_MODEL, // نموذج Groq النشط (قد يتحوّل للاحتياطي تلقائياً)
 };
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'warn' });
@@ -674,7 +677,7 @@ function classifyGroqError(status, data) {
   const msg = data?.error?.message || '';
   if (status === 429) return 'انتهت حصة Groq المجانية مؤقتاً (rate limit) — أعد المحاولة لاحقاً.';
   if (status === 401) return 'مفتاح GROQ_API_KEY غير صالح (401).';
-  if (status === 404) return `نموذج Groq "${GROQ_MODEL}" غير موجود (404).`;
+  if (status === 404) return `نموذج Groq "${aiStats.activeGroqModel}" غير موجود (404).`;
   if (status >= 500) return `خطأ مؤقت من خادم Groq (${status}).`;
   return `خطأ Groq ${status}: ${msg || 'غير معروف'}`;
 }
@@ -726,31 +729,47 @@ async function callGemini({ system, history = [], prompt, temperature = 0.6, max
 }
 
 // نداء Groq (واجهة متوافقة مع OpenAI). مفتاح بسيط عبر ترويسة Authorization.
+// عند 404 على النموذج الأساسي، يُجرَّب النموذج الاحتياطي تلقائياً مرة واحدة.
 async function callGroq({ system, history = [], prompt, temperature = 0.6, maxOutputTokens = 512, timeoutMs = 20000 }) {
   const messages = [
     ...(system ? [{ role: 'system', content: system }] : []),
     ...history.map((h) => ({ role: h.role === 'model' ? 'assistant' : 'user', content: h.text })),
     { role: 'user', content: prompt },
   ];
-  try {
-    const res = await fetchWithTimeout(
-      'https://api.groq.com/openai/v1/chat/completions',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${GROQ_API_KEY}` },
-        body: JSON.stringify({ model: GROQ_MODEL, messages, temperature, max_tokens: maxOutputTokens }),
-      },
-      timeoutMs,
-    );
-    const data = await res.json().catch(() => ({}));
-    if (res.ok) {
-      const text = (data?.choices?.[0]?.message?.content || '').trim();
-      return { ok: true, status: 200, text, error: null };
-    }
-    return { ok: false, status: res.status, text: '', error: classifyGroqError(res.status, data) };
-  } catch (err) {
-    return { ok: false, status: 0, text: '', error: `تعذّر الاتصال بـ Groq: ${err?.message || err}` };
+
+  const models = [aiStats.activeGroqModel];
+  if (GROQ_FALLBACK_MODEL && GROQ_FALLBACK_MODEL !== aiStats.activeGroqModel) {
+    models.push(GROQ_FALLBACK_MODEL);
   }
+
+  let last = { ok: false, status: 0, text: '', error: 'no attempt' };
+  for (const model of models) {
+    try {
+      const res = await fetchWithTimeout(
+        'https://api.groq.com/openai/v1/chat/completions',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${GROQ_API_KEY}` },
+          body: JSON.stringify({ model, messages, temperature, max_tokens: maxOutputTokens }),
+        },
+        timeoutMs,
+      );
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        const text = (data?.choices?.[0]?.message?.content || '').trim();
+        if (model !== aiStats.activeGroqModel) {
+          console.log(`ℹ️ تحوّل المساعد الذكي إلى نموذج Groq الاحتياطي: ${model}`);
+          aiStats.activeGroqModel = model;
+        }
+        return { ok: true, status: 200, text, error: null };
+      }
+      last = { ok: false, status: res.status, text: '', error: classifyGroqError(res.status, data) };
+      if (res.status !== 404) return last; // النموذج الاحتياطي يفيد فقط مع 404
+    } catch (err) {
+      return { ok: false, status: 0, text: '', error: `تعذّر الاتصال بـ Groq: ${err?.message || err}` };
+    }
+  }
+  return last;
 }
 
 // موزّع: يستدعي المزوّد النشط (gemini | groq). يرجّع { ok, text, error, provider }.
@@ -763,7 +782,7 @@ async function callAI(opts) {
 
 // وصف النموذج النشط للعرض في التشخيص.
 function activeModelLabel(provider) {
-  if (provider === 'groq') return `groq:${GROQ_MODEL}`;
+  if (provider === 'groq') return `groq:${aiStats.activeGroqModel}`;
   if (provider === 'gemini') return `gemini:${aiStats.activeModel}`;
   return '—';
 }
