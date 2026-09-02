@@ -116,6 +116,23 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
 // نموذج احتياطي يُجرَّب تلقائياً إذا كان النموذج الأساسي غير موجود/غير مدعوم (404).
 const GEMINI_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || 'gemini-1.5-flash';
+
+// ===== مزوّد بديل: Groq (مجاني وسريع، مفتاح بسيط gsk_...) =====
+// مفيد إذا كانت مفاتيح Gemini مقيّدة بسياسة مؤسسة (تُصدَر بصيغة AQ. غير مدعومة).
+// احصل على مفتاح مجاني من: https://console.groq.com/keys
+const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+// اختيار المزوّد: 'gemini' | 'groq' | 'auto' (الافتراضي: يختار أول مفتاح متوفّر).
+const AI_PROVIDER = String(process.env.AI_PROVIDER || 'auto').toLowerCase();
+
+// يحدّد المزوّد النشط بناءً على الإعداد والمفاتيح المتوفّرة (يرجّع null إن لا مفتاح).
+function activeProvider() {
+  if (AI_PROVIDER === 'gemini') return GEMINI_API_KEY ? 'gemini' : null;
+  if (AI_PROVIDER === 'groq') return GROQ_API_KEY ? 'groq' : null;
+  if (GEMINI_API_KEY) return 'gemini';
+  if (GROQ_API_KEY) return 'groq';
+  return null;
+}
 // أقصى عدد من الرسائل (سؤال+جواب) نحتفظ به لكل عميل لسياق المحادثة.
 const AI_MEMORY_TURNS = Math.max(0, parseInt(process.env.AI_MEMORY_TURNS || '6', 10) || 0);
 // حدّ لعدد أسئلة المساعد الذكي لكل عميل خلال نافذة زمنية (حماية للحصة المجانية).
@@ -129,7 +146,7 @@ const aiStats = {
   lastOkAt: null,
   lastError: null,
   lastErrorAt: null,
-  activeModel: GEMINI_MODEL, // قد يتحوّل للنموذج الاحتياطي تلقائياً
+  activeModel: GEMINI_MODEL, // نموذج Gemini النشط (قد يتحوّل للاحتياطي تلقائياً)
 };
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'warn' });
@@ -618,10 +635,11 @@ function buildAISystemPrompt() {
 }
 
 // ذاكرة محادثة قصيرة لكل عميل (للسياق فقط) — لا تُحفظ على القرص.
+// تُخزَّن بصيغة محايدة { role: 'user' | 'model', text } وتُحوَّل لكل مزوّد عند الاستدعاء.
 function pushAIHistory(session, role, text) {
   if (!AI_MEMORY_TURNS) return;
   if (!Array.isArray(session.aiHistory)) session.aiHistory = [];
-  session.aiHistory.push({ role, parts: [{ text }] });
+  session.aiHistory.push({ role, text });
   // نُبقي آخر (AI_MEMORY_TURNS × 2) رسالة كحدّ أقصى.
   const max = AI_MEMORY_TURNS * 2;
   if (session.aiHistory.length > max) {
@@ -651,68 +669,112 @@ function toWhatsAppText(s) {
     .trim();
 }
 
-// النواة المشتركة لاستدعاء Gemini. تُرجِع { ok, status, text, error }.
-// عند 404 على النموذج الأساسي، تُجرَّب النماذج الاحتياطية تلقائياً مرة واحدة.
-async function callGemini({ system, contents, temperature = 0.6, maxOutputTokens = 512, timeoutMs = 20000 }) {
+// يترجم خطأ Groq إلى رسالة عربية مفهومة.
+function classifyGroqError(status, data) {
+  const msg = data?.error?.message || '';
+  if (status === 429) return 'انتهت حصة Groq المجانية مؤقتاً (rate limit) — أعد المحاولة لاحقاً.';
+  if (status === 401) return 'مفتاح GROQ_API_KEY غير صالح (401).';
+  if (status === 404) return `نموذج Groq "${GROQ_MODEL}" غير موجود (404).`;
+  if (status >= 500) return `خطأ مؤقت من خادم Groq (${status}).`;
+  return `خطأ Groq ${status}: ${msg || 'غير معروف'}`;
+}
+
+// نداء Gemini (generativelanguage REST). يحوّل السجلّ المحايد لصيغة contents.
+// عند 404 على النموذج الأساسي، يُجرَّب النموذج الاحتياطي تلقائياً مرة واحدة.
+async function callGemini({ system, history = [], prompt, temperature = 0.6, maxOutputTokens = 512, timeoutMs = 20000 }) {
+  const contents = [
+    ...history.map((h) => ({ role: h.role === 'model' ? 'model' : 'user', parts: [{ text: h.text }] })),
+    { role: 'user', parts: [{ text: prompt }] },
+  ];
+
   const models = [aiStats.activeModel];
   if (GEMINI_FALLBACK_MODEL && GEMINI_FALLBACK_MODEL !== aiStats.activeModel) {
     models.push(GEMINI_FALLBACK_MODEL);
   }
 
   let last = { ok: false, status: 0, text: '', error: 'no attempt' };
-
   for (const model of models) {
-    const url =
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent` +
-      `?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+    // المفتاح يُمرَّر عبر ترويسة x-goog-api-key (لا يظهر في سجلّات الرابط).
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
     const body = {
       ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
       contents,
       generationConfig: { temperature, maxOutputTokens },
     };
-
     try {
       const res = await fetchWithTimeout(
         url,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+        { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY }, body: JSON.stringify(body) },
         timeoutMs,
       );
       const data = await res.json().catch(() => ({}));
-
       if (res.ok) {
-        const text = (data?.candidates?.[0]?.content?.parts || [])
-          .map((p) => p?.text || '')
-          .join('')
-          .trim();
-        // نجح النموذج الاحتياطي → ثبّته كنموذج نشط لتفادي 404 المتكرر.
+        const text = (data?.candidates?.[0]?.content?.parts || []).map((p) => p?.text || '').join('').trim();
         if (model !== aiStats.activeModel) {
           console.log(`ℹ️ تحوّل المساعد الذكي إلى النموذج الاحتياطي: ${model}`);
           aiStats.activeModel = model;
         }
         return { ok: true, status: 200, text, error: null };
       }
-
       last = { ok: false, status: res.status, text: '', error: classifyGeminiError(res.status, data) };
-      // نجرّب النموذج الاحتياطي فقط عند 404 (نموذج غير موجود). غير ذلك لا فائدة.
-      if (res.status !== 404) return last;
+      if (res.status !== 404) return last; // النموذج الاحتياطي يفيد فقط مع 404
     } catch (err) {
-      last = { ok: false, status: 0, text: '', error: `تعذّر الاتصال: ${err?.message || err}` };
-      return last; // خطأ شبكة — لا نجرّب نموذجاً آخر
+      return { ok: false, status: 0, text: '', error: `تعذّر الاتصال: ${err?.message || err}` };
     }
   }
   return last;
 }
 
+// نداء Groq (واجهة متوافقة مع OpenAI). مفتاح بسيط عبر ترويسة Authorization.
+async function callGroq({ system, history = [], prompt, temperature = 0.6, maxOutputTokens = 512, timeoutMs = 20000 }) {
+  const messages = [
+    ...(system ? [{ role: 'system', content: system }] : []),
+    ...history.map((h) => ({ role: h.role === 'model' ? 'assistant' : 'user', content: h.text })),
+    { role: 'user', content: prompt },
+  ];
+  try {
+    const res = await fetchWithTimeout(
+      'https://api.groq.com/openai/v1/chat/completions',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${GROQ_API_KEY}` },
+        body: JSON.stringify({ model: GROQ_MODEL, messages, temperature, max_tokens: maxOutputTokens }),
+      },
+      timeoutMs,
+    );
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) {
+      const text = (data?.choices?.[0]?.message?.content || '').trim();
+      return { ok: true, status: 200, text, error: null };
+    }
+    return { ok: false, status: res.status, text: '', error: classifyGroqError(res.status, data) };
+  } catch (err) {
+    return { ok: false, status: 0, text: '', error: `تعذّر الاتصال بـ Groq: ${err?.message || err}` };
+  }
+}
+
+// موزّع: يستدعي المزوّد النشط (gemini | groq). يرجّع { ok, text, error, provider }.
+async function callAI(opts) {
+  const provider = activeProvider();
+  if (!provider) return { ok: false, provider: null, error: 'لا يوجد مزوّد مضبوط (GEMINI_API_KEY أو GROQ_API_KEY).' };
+  const r = provider === 'groq' ? await callGroq(opts) : await callGemini(opts);
+  return { ...r, provider };
+}
+
+// وصف النموذج النشط للعرض في التشخيص.
+function activeModelLabel(provider) {
+  if (provider === 'groq') return `groq:${GROQ_MODEL}`;
+  if (provider === 'gemini') return `gemini:${aiStats.activeModel}`;
+  return '—';
+}
+
 // فحص حيّ سريع لحالة المساعد الذكي (نداء صغير للتأكد أنه يردّ فعلاً).
 async function pingAI() {
   if (!AI_ENABLED) return { ok: false, reason: 'معطّل (AI_ENABLED=false)' };
-  if (!GEMINI_API_KEY) return { ok: false, reason: 'مفتاح GEMINI_API_KEY غير مضبوط' };
-  const r = await callGemini({
-    contents: [{ role: 'user', parts: [{ text: 'قل "جاهز" فقط.' }] }],
-    maxOutputTokens: 16,
-    timeoutMs: 12000,
-  });
-  return r.ok ? { ok: true, model: aiStats.activeModel } : { ok: false, reason: r.error };
+  const provider = activeProvider();
+  if (!provider) return { ok: false, reason: 'لا يوجد مفتاح مضبوط (GEMINI_API_KEY أو GROQ_API_KEY)' };
+  const r = await callAI({ prompt: 'قل "جاهز" فقط.', maxOutputTokens: 16, timeoutMs: 12000 });
+  return r.ok ? { ok: true, provider, model: activeModelLabel(provider) } : { ok: false, provider, reason: r.error };
 }
 
 // حدّ معدّل بسيط لكل عميل: نافذة منزلقة على طوابع الأسئلة الزمنية.
@@ -726,19 +788,20 @@ function isAIRateLimited(session) {
   return false;
 }
 
-// استدعاء Gemini والحصول على ردّ نصي. يرجّع null عند أي فشل ليعود البوت
+// استدعاء المساعد والحصول على ردّ نصي. يرجّع null عند أي فشل ليعود البوت
 // لسلوكه الافتراضي (رسالة الترحيب) بلا أعطال.
 async function askAI(session, userText) {
-  if (!AI_ENABLED || !GEMINI_API_KEY) return null;
+  if (!AI_ENABLED || !activeProvider()) return null;
   const prompt = (userText || '').trim();
   if (!prompt) return null;
 
   const history = Array.isArray(session.aiHistory) ? session.aiHistory : [];
   aiStats.totalCalls += 1;
 
-  const r = await callGemini({
+  const r = await callAI({
     system: buildAISystemPrompt(),
-    contents: [...history, { role: 'user', parts: [{ text: prompt }] }],
+    history,
+    prompt,
     temperature: 0.6,
     maxOutputTokens: 512,
   });
@@ -769,15 +832,17 @@ function isAdminStatusCommand(raw) {
 
 // يبني تقرير حالة المساعد الذكي (يشمل فحصاً حيّاً) لأرقام الإدارة.
 async function buildAdminStatusMessage() {
-  const keyLine = GEMINI_API_KEY
-    ? `✅ مضبوط (…${GEMINI_API_KEY.slice(-4)})`
-    : '❌ غير مضبوط';
+  const provider = activeProvider();
+  const geminiKey = GEMINI_API_KEY ? `✅ (…${GEMINI_API_KEY.slice(-4)})` : '❌ غير مضبوط';
+  const groqKey = GROQ_API_KEY ? `✅ (…${GROQ_API_KEY.slice(-4)})` : '❌ غير مضبوط';
   const lines = [
     '🩺 *حالة المساعد الذكي*',
     '',
     `• مُفعّل (AI_ENABLED): ${AI_ENABLED ? 'نعم ✅' : 'لا ❌'}`,
-    `• المفتاح (GEMINI_API_KEY): ${keyLine}`,
-    `• النموذج النشط: ${aiStats.activeModel}`,
+    `• المزوّد النشط: ${provider ? provider : '❌ لا يوجد'}`,
+    `• مفتاح Gemini: ${geminiKey}`,
+    `• مفتاح Groq: ${groqKey}`,
+    `• النموذج النشط: ${provider ? activeModelLabel(provider) : '—'}`,
     `• ذاكرة السياق: ${AI_MEMORY_TURNS} دور`,
     `• حدّ المعدّل: ${AI_RATE_MAX ? `${AI_RATE_MAX} سؤال/${AI_RATE_WINDOW_MS / 1000}ث` : 'بلا حدّ'}`,
     `• عدّاد النداءات: ${aiStats.totalCalls} (فشل: ${aiStats.failures})`,
@@ -790,8 +855,13 @@ async function buildAdminStatusMessage() {
   const ping = await pingAI();
   lines.push('', ping.ok ? `🟢 فحص حيّ: يعمل الآن (${ping.model}).` : `🔴 فحص حيّ: لا يعمل — ${ping.reason}`);
 
-  if (!GEMINI_API_KEY) {
-    lines.push('', 'ℹ️ للتشغيل: احصل على مفتاح مجاني من https://aistudio.google.com/apikey وأضِف GEMINI_API_KEY في بيئة الاستضافة ثم أعد التشغيل.');
+  if (!provider) {
+    lines.push(
+      '',
+      'ℹ️ للتشغيل اختر أحد الخيارين وأضِف المفتاح في بيئة الاستضافة ثم أعد التشغيل:',
+      '• Gemini (مفتاح AIzaSy… فقط، ليس AQ.): https://aistudio.google.com/apikey',
+      '• Groq (مجاني وبسيط gsk_…): https://console.groq.com/keys',
+    );
   }
   return lines.join('\n');
 }
@@ -843,7 +913,7 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
       }
 
       // سؤال/كلام حر → المساعد الذكي يجيب بلغة طبيعية ثم نلحق تلميحاً للطلب.
-      if (AI_ENABLED && GEMINI_API_KEY) {
+      if (AI_ENABLED && activeProvider()) {
         if (isAIRateLimited(session)) {
           return 'وصلت لحدّ الأسئلة السريعة 🙏 انتظر لحظات ثم أعد المحاولة، أو اكتب "طلب" لبدء طلب توصيل.';
         }
@@ -1262,7 +1332,7 @@ app.get('/', (_req, res) => {
   res.json({
     service: 'Yalla Delivery WhatsApp Bot 🛵',
     status: connectionStatus,
-    ai: { enabled: AI_ENABLED, keyConfigured: !!GEMINI_API_KEY, model: aiStats.activeModel },
+    ai: { enabled: AI_ENABLED, provider: activeProvider(), model: activeProvider() ? activeModelLabel(activeProvider()) : null },
     time: new Date().toISOString(),
   });
 });
@@ -1273,10 +1343,13 @@ app.get('/health', (_req, res) => res.status(200).send('OK'));
 app.get('/ai-status', async (_req, res) => {
   try {
     const ping = await pingAI();
+    const provider = activeProvider();
     res.json({
       enabled: AI_ENABLED,
-      keyConfigured: !!GEMINI_API_KEY,
-      model: aiStats.activeModel,
+      provider,
+      geminiKeyConfigured: !!GEMINI_API_KEY,
+      groqKeyConfigured: !!GROQ_API_KEY,
+      model: provider ? activeModelLabel(provider) : null,
       memoryTurns: AI_MEMORY_TURNS,
       rateLimit: AI_RATE_MAX ? { max: AI_RATE_MAX, windowSec: AI_RATE_WINDOW_MS / 1000 } : null,
       stats: {
