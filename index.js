@@ -662,9 +662,10 @@ async function callGemini({ system, contents, temperature = 0.6, maxOutputTokens
   let last = { ok: false, status: 0, text: '', error: 'no attempt' };
 
   for (const model of models) {
+    // نمرّر المفتاح عبر ترويسة x-goog-api-key بدل رابط الطلب حتى لا يظهر في
+    // سجلّات السيرفر/البروكسي (ممارسة أفضل أمنياً)، ويدعم صيغ المفاتيح الجديدة.
     const url =
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent` +
-      `?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
     const body = {
       ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
       contents,
@@ -674,7 +675,14 @@ async function callGemini({ system, contents, temperature = 0.6, maxOutputTokens
     try {
       const res = await fetchWithTimeout(
         url,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': GEMINI_API_KEY,
+          },
+          body: JSON.stringify(body),
+        },
         timeoutMs,
       );
       const data = await res.json().catch(() => ({}));
