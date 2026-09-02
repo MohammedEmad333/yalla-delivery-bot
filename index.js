@@ -890,8 +890,16 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
   const raw = (text || '').trim();
 
   // أوامر تشخيص إدارية — تُعالَج قبل كل شيء وتُتاح لأرقام الإدارة فقط.
-  if (isAdminStatusCommand(raw) && isAdmin(phone)) {
-    return await buildAdminStatusMessage();
+  if (isAdminStatusCommand(raw)) {
+    if (isAdmin(phone)) return await buildAdminStatusMessage();
+    // ليس أدمن: نكشف للمُرسِل مُعرّفه الفعلي (كما يستقبله البوت) ليضيفه بدقّة.
+    console.log(`ℹ️ [تشخيص] أمر حالة من رقم غير مُدرج بالإدارة: "${phone}"`);
+    return (
+      '⚠️ هذا الأمر مخصّص للإدارة فقط.\n\n' +
+      `🆔 مُعرّفك كما يستقبله البوت: *${phone}*\n\n` +
+      'لتفعيل الأمر لك: أضِف هذا الرقم بالضبط إلى `ADMIN_NUMBERS` في ملف `.env` ' +
+      '(مفصولاً بفاصلة عن غيره) ثم أعد تشغيل الخدمة.'
+    );
   }
 
   // أوامر الإلغاء/التراجع تعمل في أي مرحلة
