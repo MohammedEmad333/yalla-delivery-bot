@@ -150,7 +150,31 @@ const aiStats = {
   lastErrorAt: null,
   activeModel: GEMINI_MODEL, // نموذج Gemini النشط (قد يتحوّل للاحتياطي تلقائياً)
   activeGroqModel: GROQ_MODEL, // نموذج Groq النشط (قد يتحوّل للاحتياطي تلقائياً)
+  groqLimits: null, // آخر لقطة لحدود Groq من ترويسات الاستجابة (الاستخدام المتبقي)
 };
+
+// يقرأ ترويسات حدود المعدّل من استجابة Groq (المتوافقة مع OpenAI) ويحفظ لقطة
+// بالمتبقّي (طلبات/رموز) لعرضها في تقرير التشخيص. الترويسات غير حسّاسة.
+function captureGroqLimits(res) {
+  try {
+    const h = (name) => res.headers.get(name);
+    const snap = {
+      limitRequests: h('x-ratelimit-limit-requests'),
+      remainingRequests: h('x-ratelimit-remaining-requests'),
+      resetRequests: h('x-ratelimit-reset-requests'),
+      limitTokens: h('x-ratelimit-limit-tokens'),
+      remainingTokens: h('x-ratelimit-remaining-tokens'),
+      resetTokens: h('x-ratelimit-reset-tokens'),
+      capturedAt: new Date().toISOString(),
+    };
+    // نحفظ فقط إذا وُجدت أي معلومة مفيدة.
+    if (snap.limitRequests || snap.remainingRequests || snap.remainingTokens) {
+      aiStats.groqLimits = snap;
+    }
+  } catch (_) {
+    /* الترويسات اختيارية — نتجاهل أي خطأ بأمان */
+  }
+}
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'warn' });
 
@@ -754,6 +778,7 @@ async function callGroq({ system, history = [], prompt, temperature = 0.6, maxOu
         },
         timeoutMs,
       );
+      captureGroqLimits(res); // نلتقط الاستخدام المتبقي من الترويسات (متاح حتى مع الخطأ)
       const data = await res.json().catch(() => ({}));
       if (res.ok) {
         const text = (data?.choices?.[0]?.message?.content || '').trim();
@@ -870,9 +895,29 @@ async function buildAdminStatusMessage() {
     lines.push(`• آخر خطأ: ${aiStats.lastError} (${aiStats.lastErrorAt || '?'})`);
   }
 
-  // فحص حيّ فعلي.
+  // فحص حيّ فعلي (يُحدّث كذلك لقطة حدود Groq من ترويسات الاستجابة).
   const ping = await pingAI();
   lines.push('', ping.ok ? `🟢 فحص حيّ: يعمل الآن (${ping.model}).` : `🔴 فحص حيّ: لا يعمل — ${ping.reason}`);
+
+  // الاستخدام المتبقّي (Groq فقط — من ترويسات آخر نداء).
+  if (provider === 'groq') {
+    const g = aiStats.groqLimits;
+    if (g && (g.remainingRequests || g.remainingTokens)) {
+      lines.push('', '📊 *الاستخدام المتبقّي (Groq):*');
+      if (g.remainingRequests) {
+        const limit = g.limitRequests ? `/${g.limitRequests}` : '';
+        const reset = g.resetRequests ? ` — تتجدّد بعد ${g.resetRequests}` : '';
+        lines.push(`• الطلبات: ${g.remainingRequests}${limit}${reset}`);
+      }
+      if (g.remainingTokens) {
+        const limit = g.limitTokens ? `/${g.limitTokens}` : '';
+        const reset = g.resetTokens ? ` — تتجدّد بعد ${g.resetTokens}` : '';
+        lines.push(`• الرموز (tokens): ${g.remainingTokens}${limit}${reset}`);
+      }
+    } else {
+      lines.push('', 'ℹ️ الاستخدام المتبقّي غير متوفّر بعد (يظهر بعد أول ردّ فعلي).');
+    }
+  }
 
   if (!provider) {
     lines.push(
@@ -1386,6 +1431,7 @@ app.get('/ai-status', async (_req, res) => {
         lastError: aiStats.lastError,
         lastErrorAt: aiStats.lastErrorAt,
       },
+      groqLimits: provider === 'groq' ? aiStats.groqLimits : null,
       ping,
     });
   } catch (e) {
