@@ -114,8 +114,23 @@ const BUSINESS_NUMBER = (process.env.BUSINESS_NUMBER || '970593456405').replace(
 const AI_ENABLED = String(process.env.AI_ENABLED ?? 'true').toLowerCase() === 'true';
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+// نموذج احتياطي يُجرَّب تلقائياً إذا كان النموذج الأساسي غير موجود/غير مدعوم (404).
+const GEMINI_FALLBACK_MODEL = process.env.GEMINI_FALLBACK_MODEL || 'gemini-1.5-flash';
 // أقصى عدد من الرسائل (سؤال+جواب) نحتفظ به لكل عميل لسياق المحادثة.
 const AI_MEMORY_TURNS = Math.max(0, parseInt(process.env.AI_MEMORY_TURNS || '6', 10) || 0);
+// حدّ لعدد أسئلة المساعد الذكي لكل عميل خلال نافذة زمنية (حماية للحصة المجانية).
+const AI_RATE_MAX = Math.max(0, parseInt(process.env.AI_RATE_MAX || '8', 10) || 0); // 0 = بلا حدّ
+const AI_RATE_WINDOW_MS = Math.max(1, parseInt(process.env.AI_RATE_WINDOW_SEC || '60', 10) || 60) * 1000;
+
+// إحصاءات حيّة لحالة المساعد الذكي — تُعرض في أمر التشخيص و/ai-status.
+const aiStats = {
+  totalCalls: 0,
+  failures: 0,
+  lastOkAt: null,
+  lastError: null,
+  lastErrorAt: null,
+  activeModel: GEMINI_MODEL, // قد يتحوّل للنموذج الاحتياطي تلقائياً
+};
 
 const logger = pino({ level: process.env.LOG_LEVEL || 'warn' });
 
@@ -247,6 +262,29 @@ const PRICING_MESSAGE =
   'اكتب "طلب" لبدء طلب جديد، أو "إلغاء" للعودة للقائمة.';
 
 const SUPPORT_NUMBER = process.env.SUPPORT_NUMBER || '+970593456405';
+
+// أرقام الإدارة: تُميَّز لعرض أوامر التشخيص (مثل "/حالة") التي لا يراها العملاء.
+// افتراضياً: رقم الأعمال + رقم الدعم. أضِف أرقاماً بفاصلة في ADMIN_NUMBERS.
+const ADMIN_NUMBERS = Array.from(
+  new Set(
+    [
+      ...(process.env.ADMIN_NUMBERS || '').split(','),
+      BUSINESS_NUMBER,
+      SUPPORT_NUMBER,
+    ]
+      .map((s) => (s || '').replace(/\D/g, ''))
+      .filter((s) => s.length >= 8),
+  ),
+);
+
+// هل الرقم المُرسِل ضمن أرقام الإدارة؟ (نطابق آخر 9 خانات لتجاوز اختلاف رمز الدولة)
+function isAdmin(phone) {
+  const p = (phone || '').replace(/\D/g, '');
+  if (!p) return false;
+  const tail = p.slice(-9);
+  return ADMIN_NUMBERS.some((a) => a === p || a.slice(-9) === tail);
+}
+
 const SUPPORT_MESSAGE =
   '📞 *الدعم الفني*\n\n' +
   'فريقنا جاهز لمساعدتك:\n' +
@@ -591,6 +629,103 @@ function pushAIHistory(session, role, text) {
   }
 }
 
+// يترجم رمز حالة خطأ Gemini إلى رسالة عربية مفهومة (لسجلّات التشخيص).
+function classifyGeminiError(status, data) {
+  const msg = data?.error?.message || '';
+  if (status === 429) return 'انتهت الحصة المجانية مؤقتاً (rate limit / quota) — أعد المحاولة لاحقاً.';
+  if (status === 400 && /api key not valid|api_key_invalid/i.test(msg)) return 'مفتاح GEMINI_API_KEY غير صالح.';
+  if (status === 403) return 'المفتاح غير مصرّح له (403) — تأكد من تفعيل Generative Language API للمفتاح.';
+  if (status === 404) return `النموذج "${aiStats.activeModel}" غير موجود/غير مدعوم (404).`;
+  if (status >= 500) return `خطأ مؤقت من خادم Gemini (${status}).`;
+  return `خطأ ${status}: ${msg || 'غير معروف'}`;
+}
+
+// يحوّل تنسيق ماركداون الذي قد يعيده النموذج إلى تنسيق واتساب المدعوم.
+function toWhatsAppText(s) {
+  if (!s) return s;
+  return String(s)
+    .replace(/\*\*(.+?)\*\*/g, '*$1*') // **عريض** → *عريض*
+    .replace(/^#{1,6}\s*/gm, '') // إزالة رؤوس الماركداون (#)
+    .replace(/^\s*[-*]\s+/gm, '• ') // توحيد النقاط
+    .replace(/\n{3,}/g, '\n\n') // تقليص الأسطر الفارغة المتتالية
+    .trim();
+}
+
+// النواة المشتركة لاستدعاء Gemini. تُرجِع { ok, status, text, error }.
+// عند 404 على النموذج الأساسي، تُجرَّب النماذج الاحتياطية تلقائياً مرة واحدة.
+async function callGemini({ system, contents, temperature = 0.6, maxOutputTokens = 512, timeoutMs = 20000 }) {
+  const models = [aiStats.activeModel];
+  if (GEMINI_FALLBACK_MODEL && GEMINI_FALLBACK_MODEL !== aiStats.activeModel) {
+    models.push(GEMINI_FALLBACK_MODEL);
+  }
+
+  let last = { ok: false, status: 0, text: '', error: 'no attempt' };
+
+  for (const model of models) {
+    const url =
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent` +
+      `?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+    const body = {
+      ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
+      contents,
+      generationConfig: { temperature, maxOutputTokens },
+    };
+
+    try {
+      const res = await fetchWithTimeout(
+        url,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
+        timeoutMs,
+      );
+      const data = await res.json().catch(() => ({}));
+
+      if (res.ok) {
+        const text = (data?.candidates?.[0]?.content?.parts || [])
+          .map((p) => p?.text || '')
+          .join('')
+          .trim();
+        // نجح النموذج الاحتياطي → ثبّته كنموذج نشط لتفادي 404 المتكرر.
+        if (model !== aiStats.activeModel) {
+          console.log(`ℹ️ تحوّل المساعد الذكي إلى النموذج الاحتياطي: ${model}`);
+          aiStats.activeModel = model;
+        }
+        return { ok: true, status: 200, text, error: null };
+      }
+
+      last = { ok: false, status: res.status, text: '', error: classifyGeminiError(res.status, data) };
+      // نجرّب النموذج الاحتياطي فقط عند 404 (نموذج غير موجود). غير ذلك لا فائدة.
+      if (res.status !== 404) return last;
+    } catch (err) {
+      last = { ok: false, status: 0, text: '', error: `تعذّر الاتصال: ${err?.message || err}` };
+      return last; // خطأ شبكة — لا نجرّب نموذجاً آخر
+    }
+  }
+  return last;
+}
+
+// فحص حيّ سريع لحالة المساعد الذكي (نداء صغير للتأكد أنه يردّ فعلاً).
+async function pingAI() {
+  if (!AI_ENABLED) return { ok: false, reason: 'معطّل (AI_ENABLED=false)' };
+  if (!GEMINI_API_KEY) return { ok: false, reason: 'مفتاح GEMINI_API_KEY غير مضبوط' };
+  const r = await callGemini({
+    contents: [{ role: 'user', parts: [{ text: 'قل "جاهز" فقط.' }] }],
+    maxOutputTokens: 16,
+    timeoutMs: 12000,
+  });
+  return r.ok ? { ok: true, model: aiStats.activeModel } : { ok: false, reason: r.error };
+}
+
+// حدّ معدّل بسيط لكل عميل: نافذة منزلقة على طوابع الأسئلة الزمنية.
+function isAIRateLimited(session) {
+  if (!AI_RATE_MAX) return false;
+  const now = Date.now();
+  if (!Array.isArray(session.aiCallTimes)) session.aiCallTimes = [];
+  session.aiCallTimes = session.aiCallTimes.filter((t) => now - t < AI_RATE_WINDOW_MS);
+  if (session.aiCallTimes.length >= AI_RATE_MAX) return true;
+  session.aiCallTimes.push(now);
+  return false;
+}
+
 // استدعاء Gemini والحصول على ردّ نصي. يرجّع null عند أي فشل ليعود البوت
 // لسلوكه الافتراضي (رسالة الترحيب) بلا أعطال.
 async function askAI(session, userText) {
@@ -598,50 +733,77 @@ async function askAI(session, userText) {
   const prompt = (userText || '').trim();
   if (!prompt) return null;
 
-  const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent` +
-    `?key=${encodeURIComponent(GEMINI_API_KEY)}`;
-
   const history = Array.isArray(session.aiHistory) ? session.aiHistory : [];
-  const body = {
-    systemInstruction: { parts: [{ text: buildAISystemPrompt() }] },
+  aiStats.totalCalls += 1;
+
+  const r = await callGemini({
+    system: buildAISystemPrompt(),
     contents: [...history, { role: 'user', parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0.6, maxOutputTokens: 512 },
-  };
+    temperature: 0.6,
+    maxOutputTokens: 512,
+  });
 
-  try {
-    const res = await fetchWithTimeout(
-      url,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      },
-      20000,
-    );
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      console.error(`⚠️ Gemini API خطأ (${res.status}):`, data?.error?.message || '');
-      return null;
-    }
-    const reply = data?.candidates?.[0]?.content?.parts
-      ?.map((p) => p?.text || '')
-      .join('')
-      .trim();
-    if (!reply) return null;
-
-    pushAIHistory(session, 'user', prompt);
-    pushAIHistory(session, 'model', reply);
-    return reply;
-  } catch (err) {
-    console.error('⚠️ تعذّر الاتصال بالمساعد الذكي:', err?.message || err);
+  if (!r.ok) {
+    aiStats.failures += 1;
+    aiStats.lastError = r.error;
+    aiStats.lastErrorAt = new Date().toISOString();
+    console.error(`⚠️ المساعد الذكي: ${r.error}`);
     return null;
   }
+
+  const reply = toWhatsAppText(r.text);
+  if (!reply) return null;
+
+  aiStats.lastOkAt = new Date().toISOString();
+  pushAIHistory(session, 'user', prompt);
+  pushAIHistory(session, 'model', reply);
+  return reply;
+}
+
+// أوامر التشخيص الإدارية (لا يراها العملاء) — للاطمئنان على المساعد الذكي.
+const ADMIN_STATUS_COMMANDS = ['/حالة', '/الحالة', '/status', '/ai', 'حالة المساعد', 'فحص المساعد', 'ai status'];
+function isAdminStatusCommand(raw) {
+  const t = normalize(raw);
+  return ADMIN_STATUS_COMMANDS.some((c) => t === normalize(c));
+}
+
+// يبني تقرير حالة المساعد الذكي (يشمل فحصاً حيّاً) لأرقام الإدارة.
+async function buildAdminStatusMessage() {
+  const keyLine = GEMINI_API_KEY
+    ? `✅ مضبوط (…${GEMINI_API_KEY.slice(-4)})`
+    : '❌ غير مضبوط';
+  const lines = [
+    '🩺 *حالة المساعد الذكي*',
+    '',
+    `• مُفعّل (AI_ENABLED): ${AI_ENABLED ? 'نعم ✅' : 'لا ❌'}`,
+    `• المفتاح (GEMINI_API_KEY): ${keyLine}`,
+    `• النموذج النشط: ${aiStats.activeModel}`,
+    `• ذاكرة السياق: ${AI_MEMORY_TURNS} دور`,
+    `• حدّ المعدّل: ${AI_RATE_MAX ? `${AI_RATE_MAX} سؤال/${AI_RATE_WINDOW_MS / 1000}ث` : 'بلا حدّ'}`,
+    `• عدّاد النداءات: ${aiStats.totalCalls} (فشل: ${aiStats.failures})`,
+  ];
+  if (aiStats.lastError) {
+    lines.push(`• آخر خطأ: ${aiStats.lastError} (${aiStats.lastErrorAt || '?'})`);
+  }
+
+  // فحص حيّ فعلي.
+  const ping = await pingAI();
+  lines.push('', ping.ok ? `🟢 فحص حيّ: يعمل الآن (${ping.model}).` : `🔴 فحص حيّ: لا يعمل — ${ping.reason}`);
+
+  if (!GEMINI_API_KEY) {
+    lines.push('', 'ℹ️ للتشغيل: احصل على مفتاح مجاني من https://aistudio.google.com/apikey وأضِف GEMINI_API_KEY في بيئة الاستضافة ثم أعد التشغيل.');
+  }
+  return lines.join('\n');
 }
 
 async function handleMessage(jid, phone, text, hasMedia = false) {
   const session = getSession(jid);
   const raw = (text || '').trim();
+
+  // أوامر تشخيص إدارية — تُعالَج قبل كل شيء وتُتاح لأرقام الإدارة فقط.
+  if (isAdminStatusCommand(raw) && isAdmin(phone)) {
+    return await buildAdminStatusMessage();
+  }
 
   // أوامر الإلغاء/التراجع تعمل في أي مرحلة
   if (includesAny(raw, CANCEL_KEYWORDS) && session.state !== STATES.IDLE) {
@@ -681,9 +843,14 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
       }
 
       // سؤال/كلام حر → المساعد الذكي يجيب بلغة طبيعية ثم نلحق تلميحاً للطلب.
-      const aiReply = await askAI(session, raw);
-      if (aiReply) {
-        return aiReply + '\n\n💡 اكتب "طلب" لبدء طلب توصيل جديد.';
+      if (AI_ENABLED && GEMINI_API_KEY) {
+        if (isAIRateLimited(session)) {
+          return 'وصلت لحدّ الأسئلة السريعة 🙏 انتظر لحظات ثم أعد المحاولة، أو اكتب "طلب" لبدء طلب توصيل.';
+        }
+        const aiReply = await askAI(session, raw);
+        if (aiReply) {
+          return aiReply + '\n\n💡 اكتب "طلب" لبدء طلب توصيل جديد.';
+        }
       }
 
       // احتياطي عند تعذّر المساعد (غياب المفتاح/انقطاع): وجّه حسب أقرب نيّة.
@@ -1095,11 +1262,36 @@ app.get('/', (_req, res) => {
   res.json({
     service: 'Yalla Delivery WhatsApp Bot 🛵',
     status: connectionStatus,
+    ai: { enabled: AI_ENABLED, keyConfigured: !!GEMINI_API_KEY, model: aiStats.activeModel },
     time: new Date().toISOString(),
   });
 });
 
 app.get('/health', (_req, res) => res.status(200).send('OK'));
+
+// حالة المساعد الذكي (تشخيص) — يشمل فحصاً حيّاً لخادم Gemini.
+app.get('/ai-status', async (_req, res) => {
+  try {
+    const ping = await pingAI();
+    res.json({
+      enabled: AI_ENABLED,
+      keyConfigured: !!GEMINI_API_KEY,
+      model: aiStats.activeModel,
+      memoryTurns: AI_MEMORY_TURNS,
+      rateLimit: AI_RATE_MAX ? { max: AI_RATE_MAX, windowSec: AI_RATE_WINDOW_MS / 1000 } : null,
+      stats: {
+        totalCalls: aiStats.totalCalls,
+        failures: aiStats.failures,
+        lastOkAt: aiStats.lastOkAt,
+        lastError: aiStats.lastError,
+        lastErrorAt: aiStats.lastErrorAt,
+      },
+      ping,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 app.get('/qr', async (_req, res) => {
   if (connectionStatus === 'connected') {
@@ -1141,4 +1333,4 @@ if (require.main === module) {
 }
 
 // تصدير منطق المحادثة لاختباره محلياً بلا واتساب (test-flow.js)
-module.exports = { handleMessage, resetSession, STATES };
+module.exports = { handleMessage, resetSession, STATES, isAdmin, pingAI, toWhatsAppText };
