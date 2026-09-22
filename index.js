@@ -47,8 +47,31 @@ const PORT = process.env.PORT || 3000;
 // الجلسة إذا شغّل systemd العملية من دليل عمل مختلف (سبب شائع لطلب ربط جديد).
 const AUTH_FOLDER = path.resolve(__dirname, process.env.AUTH_FOLDER || 'auth_info');
 // روابط تحميل تطبيق يلا ديلفري (عدّلها لروابطك الحقيقية)
-const APP_ANDROID_URL = process.env.APP_ANDROID_URL || 'https://play.google.com/store/apps/details?id=com.mohammedemad333.yalla';
-const APP_WEB_URL = process.env.APP_WEB_URL || 'https://app.yalladelivery.org/';
+const OFFICIAL_ANDROID_URL = 'https://play.google.com/store/apps/details?id=com.mohammedemad333.yalla';
+const OFFICIAL_WEB_URL = 'https://app.yalladelivery.org/';
+const OFFICIAL_HOME_URL = 'https://yalladelivery.org/';
+
+function canonicalAppUrl(value, kind) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    if (kind === 'android') return OFFICIAL_ANDROID_URL;
+    if (kind === 'web') return OFFICIAL_WEB_URL;
+    return OFFICIAL_HOME_URL;
+  }
+
+  // ترقية الروابط القديمة تلقائياً حتى لو بقيت في .env على الخادم.
+  if (kind === 'android' && raw.includes('/apps/testing/com.mohammedemad333.yalla')) {
+    return OFFICIAL_ANDROID_URL;
+  }
+  if (kind === 'web' && raw.includes('yalla.mohammedelrefy28.workers.dev')) {
+    return OFFICIAL_WEB_URL;
+  }
+  return raw;
+}
+
+const APP_ANDROID_URL = canonicalAppUrl(process.env.APP_ANDROID_URL, 'android');
+const APP_WEB_URL = canonicalAppUrl(process.env.APP_WEB_URL, 'web');
+const APP_HOME_URL = canonicalAppUrl(process.env.APP_HOME_URL, 'home');
 
 // ===== تسعير التوصيل (مطابق لتطبيق يلا ديلفري — pricing.service.js) =====
 // النموذج الفعلي في الخادم: كل 250 متر = 1 شيكل، المسافة بين حي الاستلام
@@ -222,7 +245,8 @@ const APP_DOWNLOAD_MESSAGE =
   '📲 *اطلب من تطبيق Yalla Delivery*\n\n' +
   'إنشاء الطلبات يتم من التطبيق حتى تقدر تشوف السعر وتتابع حالة طلبك بسهولة.\n\n' +
   `📱 أندرويد: ${APP_ANDROID_URL}\n` +
-  `🌐 الويب: ${APP_WEB_URL}`;
+  `🌐 تطبيق الويب: ${APP_WEB_URL}\n` +
+  `🏠 الصفحة الرئيسية: ${APP_HOME_URL}`;
 
 const WELCOME_MESSAGE =
   'أهلاً وسهلاً في *Yalla Delivery* 👋🧡\n' +
@@ -334,7 +358,8 @@ function buildAISystemPrompt() {
     '- أوقات دعم العملاء: يومياً من 9 صباحاً حتى 11 مساءً.',
     `- رقم الدعم: ${SUPPORT_NUMBER}.`,
     `- رابط أندرويد: ${APP_ANDROID_URL}.`,
-    `- رابط الويب: ${APP_WEB_URL}.`,
+    `- رابط تطبيق الويب: ${APP_WEB_URL}.`,
+    `- رابط الصفحة الرئيسية: ${APP_HOME_URL}.`,
     '',
     'قواعد الرد:',
     '- لا تنشئ طلباً من واتساب، ولا تجمع الاسم أو العنوان أو تفاصيل الشحنة أو بيانات الدفع بهدف إنشاء طلب.',
