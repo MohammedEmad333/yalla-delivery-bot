@@ -13,8 +13,8 @@ const PHONE = '970000000000';
 const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
 console.log('🧪 وضع اختبار يلا ديلفري (بلا واتساب). اكتب رسالتك ثم Enter. للخروج: /exit\n');
-console.log('جرّب مثلاً: مرحبا  ثم  1  ثم  1 ...');
-console.log('عند طلب الحي، اكتب رقم الحي من القائمة (مثل: 1 للرمال)\n');
+console.log('جرّب مثلاً: مرحبا، طلب، 1، أسعار، أو دعم.');
+console.log('كلمة "طلب" يجب أن تعيد رابط التطبيق ولا تبدأ طلباً داخل واتساب.\n');
 
 function ask() {
   rl.question('👤 أنت: ', async (line) => {
