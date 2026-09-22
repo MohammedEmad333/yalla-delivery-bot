@@ -81,7 +81,7 @@ const APP_HOME_URL = canonicalAppUrl(process.env.APP_HOME_URL, 'home');
 const CURRENCY = process.env.CURRENCY || '₪';
 const METERS_PER_SHEKEL = 250; // كل هذا القدر من الأمتار = 1 شيكل (مطابق للتطبيق)
 const ROAD_FACTOR = 1.3;        // معامل تعويض انحناء الطرق مقابل الخط المستقيم
-const MIN_FARE = 5;             // أقل أجرة (مطابق للتطبيق)
+const MIN_FARE = 8;             // الحد الأدنى الحالي لأجرة التوصيل — مطابق لتطبيق Yalla
 
 // أحياء مدينة غزة — لكل حي إحداثيّة تمثيلية [lng, lat] قرب مركزه (مطابقة للتطبيق)
 const GAZA_NEIGHBORHOODS = [
@@ -260,10 +260,10 @@ const WELCOME_MESSAGE =
 
 const PRICING_MESSAGE =
   '💰 *أسعار التوصيل*\n\n' +
-  'أجرة التوصيل بتتحسب حسب المسافة بين الاستلام والتسليم.\n' +
-  `• تقريباً كل ${METERS_PER_SHEKEL} متر = 1 ${CURRENCY}\n` +
+  'أجرة التوصيل بتتحسب حسب المسافة بين موقع الاستلام وموقع التسليم.\n' +
+  `• كل ${METERS_PER_SHEKEL} متر تقريباً = 1 ${CURRENCY}\n` +
   `• الحد الأدنى لأجرة التوصيل: ${MIN_FARE} ${CURRENCY}\n\n` +
-  'السعر الفعلي بيظهر داخل التطبيق قبل تأكيد الطلب.\n' +
+  '📍 السعر النهائي بيظهر داخل التطبيق حسب المسافة قبل تأكيد الطلب.\n' +
   `🌐 ${APP_WEB_URL}`;
 
 const SUPPORT_NUMBER = process.env.SUPPORT_NUMBER || '+970593456405';
