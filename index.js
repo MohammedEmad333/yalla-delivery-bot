@@ -1274,14 +1274,24 @@ async function startBot() {
         // الرسائل الواردة من العملاء تُعالج فقط كـ notify؛ رسائل append غالباً مزامنة تاريخية.
         if (type !== 'notify') continue;
 
-        // أثناء التدخل البشري لا يرسل البوت أو الـAI أي رد للعميل.
-        if (isHumanTakeoverActive(jid)) {
-          console.log(`👤 تجاهل رد آلي لـ ${jid.split('@')[0]} — المحادثة تحت التدخل البشري.`);
-          continue;
-        }
-
         const text = extractText(msg);
         const hasMedia = hasMediaMessage(msg);
+
+        // أثناء التدخل البشري نسمح فقط بأمر صريح لإعادة البوت.
+        // هذا يجعل /بوت و /resume يعملان حتى لو أرسلهما العميل أثناء فترة الاستلام البشري.
+        if (isHumanTakeoverActive(jid)) {
+          if (isResumeBotCommand(text)) {
+            resumeBotForChat(jid);
+            const confirmation = await sock.sendMessage(jid, {
+              text: '🤖 تم استئناف مساعد Yalla الآلي. تقدر تكمل استفسارك بشكل طبيعي.',
+            });
+            rememberBotMessage(confirmation);
+            incrementStat('botReplies');
+          } else {
+            console.log(`👤 تجاهل رد آلي لـ ${jid.split('@')[0]} — المحادثة تحت التدخل البشري.`);
+          }
+          continue;
+        }
         if (!text && !hasMedia) continue;
 
         const phone = jid.split('@')[0];
