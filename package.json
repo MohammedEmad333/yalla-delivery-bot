@@ -1,7 +1,7 @@
 {
   "name": "yalla-delivery-bot",
   "version": "1.0.0",
-  "description": "Yalla Delivery - WhatsApp interactive delivery bot built with Baileys",
+  "description": "Yalla Delivery - WhatsApp customer support and app-routing bot built with Baileys",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
