@@ -149,6 +149,7 @@ const AI_RATE_WINDOW_MS = Math.max(1, parseInt(process.env.AI_RATE_WINDOW_SEC ||
 const AI_MAX_INPUT_CHARS = Math.max(200, parseInt(process.env.AI_MAX_INPUT_CHARS || '1200', 10) || 1200);
 const AI_SESSION_TTL_MS = Math.max(5, parseInt(process.env.AI_SESSION_TTL_MIN || '60', 10) || 60) * 60 * 1000;
 const HUMAN_TAKEOVER_MS = Math.max(5, parseInt(process.env.HUMAN_TAKEOVER_MIN || '30', 10) || 30) * 60 * 1000;
+const SMART_ESCALATION_REPEAT = Math.max(1, parseInt(process.env.SMART_ESCALATION_REPEAT || '2', 10) || 2);
 
 // إحصاءات حيّة لحالة المساعد الذكي — تُعرض في أمر التشخيص و/ai-status.
 const aiStats = {
@@ -427,7 +428,7 @@ function shouldEscalate(session, raw) {
   if (includesAny(raw, ESCALATION_KEYWORDS)) return true;
   const now = Date.now();
   session.supportAttempts = (session.supportAttempts || []).filter((t) => now - t < 15 * 60 * 1000);
-  return session.supportAttempts.length >= 2;
+  return session.supportAttempts.length >= SMART_ESCALATION_REPEAT;
 }
 
 function recordSupportAttempt(session) {
