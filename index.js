@@ -162,6 +162,31 @@ const aiStats = {
   groqLimits: null, // آخر لقطة لحدود Groq من ترويسات الاستجابة (الاستخدام المتبقي)
 };
 
+const botStats = {
+  startedAt: new Date().toISOString(),
+  inboundMessages: 0,
+  botReplies: 0,
+  aiReplies: 0,
+  fixedReplies: 0,
+  appLinks: 0,
+  pricingRequests: 0,
+  areaRequests: 0,
+  orderStatusRequests: 0,
+  supportRequests: 0,
+  commonIssueReplies: 0,
+  escalations: 0,
+  humanTakeovers: 0,
+};
+
+function incrementStat(name, amount = 1) {
+  if (Object.hasOwn(botStats, name)) botStats[name] += amount;
+}
+
+function activeTakeoverCount() {
+  const now = Date.now();
+  return Object.values(sessions).filter((session) => (session.humanTakeoverUntil || 0) > now).length;
+}
+
 // يقرأ ترويسات حدود المعدّل من استجابة Groq (المتوافقة مع OpenAI) ويحفظ لقطة
 // بالمتبقّي (طلبات/رموز) لعرضها في تقرير التشخيص. الترويسات غير حسّاسة.
 function captureGroqLimits(res) {
@@ -243,11 +268,14 @@ function resetSession(jid) {
   sessions[jid] = { state: STATES.IDLE, lastSeenAt: Date.now() };
 }
 
-function activateHumanTakeover(jid) {
+function activateHumanTakeover(jid, reason = 'manual') {
   const session = getSession(jid);
+  const wasActive = (session.humanTakeoverUntil || 0) > Date.now();
   session.humanTakeoverUntil = Date.now() + HUMAN_TAKEOVER_MS;
   session.aiHistory = [];
-  console.log(`👤 تدخل بشري مفعّل لـ ${jid.split('@')[0]} لمدة ${Math.round(HUMAN_TAKEOVER_MS / 60000)} دقيقة.`);
+  session.escalationReason = reason;
+  if (!wasActive) incrementStat('humanTakeovers');
+  console.log(`👤 تدخل بشري مفعّل لـ ${jid.split('@')[0]} لمدة ${Math.round(HUMAN_TAKEOVER_MS / 60000)} دقيقة (${reason}).`);
 }
 
 function isHumanTakeoverActive(jid) {
@@ -346,6 +374,68 @@ const ORDER_STATUS_MESSAGE =
   'ما بقدر أشوف حالة طلبك أو بيانات حسابك مباشرة من واتساب.\n' +
   'لمتابعة الطلب افتح تطبيق Yalla Delivery وشوف حالة الطلب من داخل التطبيق.\n\n' +
   `🌐 تطبيق الويب: ${APP_WEB_URL}`;
+
+const COMMON_ISSUE_MESSAGES = {
+  login:
+    '🔐 *مشكلة تسجيل الدخول*\n\n' +
+    'تأكد من رقم الهاتف/بيانات الدخول، وأغلق التطبيق وافتحه من جديد. إذا استمرت المشكلة، ابعت للدعم وصف الخطأ أو لقطة شاشة بدون إرسال كلمة مرور أو رمز تحقق.',
+  code:
+    '📩 *رمز التحقق ما وصل*\n\n' +
+    'تأكد أن رقم الهاتف مكتوب بشكل صحيح وأن عندك اتصال بالشبكة، وانتظر دقيقة قبل طلب رمز جديد. لا تشارك رمز التحقق مع أي شخص. إذا استمرت المشكلة تواصل مع الدعم.',
+  app:
+    '📱 *التطبيق لا يعمل بشكل طبيعي*\n\n' +
+    'جرّب إغلاق التطبيق بالكامل وفتحه من جديد، وتأكد أنك تستخدم آخر إصدار. إذا استمرت المشكلة ابعت للدعم نوع الجهاز ووصف قصير للخطأ أو لقطة شاشة.',
+  payment:
+    '💳 *مشكلة بالدفع أو المحفظة*\n\n' +
+    'لا ترسل بيانات البطاقة أو رمز تحقق على واتساب. اذكر فقط نوع المشكلة والمبلغ التقريبي ووقت حدوثها، وفريق الدعم يتابع معك.',
+  order:
+    '⏳ *الطلب متأخر أو عالق*\n\n' +
+    'تابع حالة الطلب من داخل التطبيق أولاً. إذا ظلت الحالة بدون تحديث أو في مشكلة بالتسليم، تواصل مع الدعم واذكر رقم الطلب فقط.',
+  location:
+    '📍 *مشكلة بالموقع*\n\n' +
+    'فعّل صلاحية الموقع للتطبيق وGPS، وتأكد من اتصال الإنترنت، ثم افتح الخريطة وحاول تحديد الموقع مرة ثانية. إذا بقي الموقع غير دقيق تواصل مع الدعم.',
+};
+
+const COMMON_ISSUES = [
+  { key: 'login', words: ['مش قادر اسجل', 'مش قادر أسجل', 'تسجيل الدخول', 'ما بقدر اسجل', 'ما بقدر أسجل', 'بيانات الدخول'] },
+  { key: 'code', words: ['الكود ما وصل', 'رمز التحقق', 'كود التحقق', 'otp', 'ما وصلني الكود'] },
+  { key: 'app', words: ['التطبيق ما بفتح', 'التطبيق لا يفتح', 'التطبيق بعلق', 'التطبيق يعلق', 'التطبيق مش شغال', 'التطبيق لا يعمل', 'انهار التطبيق', 'crash'] },
+  { key: 'payment', words: ['الدفع فشل', 'مشكلة دفع', 'المحفظة', 'المحفظه', 'الرصيد', 'خصم'] },
+  { key: 'order', words: ['الطلب عالق', 'الطلب متأخر', 'الطلب تاخر', 'الطلب تأخر', 'ما تحرك الطلب'] },
+  { key: 'location', words: ['الموقع غلط', 'الموقع غير دقيق', 'gps', 'تحديد الموقع', 'مشكلة بالموقع'] },
+];
+
+const ESCALATION_KEYWORDS = [
+  'بدي موظف', 'بدي احكي مع موظف', 'بدي أحكي مع موظف', 'بدي شخص',
+  'احكي مع شخص', 'أحكي مع شخص', 'موظف خدمة', 'خدمة العملاء',
+  'بني ادم', 'بني آدم', 'انسان', 'إنسان', 'ما انحل', 'ما انحلت',
+  'لسا المشكلة', 'لسه المشكلة', 'بدي اشتكي', 'بدي أشتكي',
+];
+
+const ESCALATION_MESSAGE =
+  '👤 *تم تحويل المحادثة لفريق الدعم*\n\n' +
+  `رح يتابع معك أحد أفراد الفريق من نفس المحادثة. خلال المتابعة البشرية، البوت رح يتوقف عن الرد تلقائياً لمدة ${Math.round(HUMAN_TAKEOVER_MS / 60000)} دقيقة.`;
+
+function detectCommonIssue(raw) {
+  for (const issue of COMMON_ISSUES) {
+    if (includesAny(raw, issue.words)) return issue.key;
+  }
+  return null;
+}
+
+function shouldEscalate(session, raw) {
+  if (includesAny(raw, ESCALATION_KEYWORDS)) return true;
+  const now = Date.now();
+  session.supportAttempts = (session.supportAttempts || []).filter((t) => now - t < 15 * 60 * 1000);
+  return session.supportAttempts.length >= 2;
+}
+
+function recordSupportAttempt(session) {
+  const now = Date.now();
+  if (!Array.isArray(session.supportAttempts)) session.supportAttempts = [];
+  session.supportAttempts.push(now);
+  session.supportAttempts = session.supportAttempts.filter((t) => now - t < 15 * 60 * 1000);
+}
 
 const GREETING_KEYWORDS = [
   'مرحبا', 'مرحباً', 'السلام عليكم', 'اهلا', 'أهلا', 'هلا',
@@ -676,9 +766,66 @@ async function askAI(session, userText) {
 
 // أوامر التشخيص الإدارية (لا يراها العملاء) — للاطمئنان على المساعد الذكي.
 const ADMIN_STATUS_COMMANDS = ['/حالة', '/الحالة', '/status', '/ai', 'حالة المساعد', 'فحص المساعد', 'ai status'];
-function isAdminStatusCommand(raw) {
+const ADMIN_STATS_COMMANDS = ['/stats', '/إحصائيات', '/احصائيات', 'إحصائيات البوت', 'احصائيات البوت'];
+const ADMIN_CHATS_COMMANDS = ['/محادثات', '/chats', 'المحادثات'];
+
+function matchesCommand(raw, commands) {
   const t = normalize(raw);
-  return ADMIN_STATUS_COMMANDS.some((c) => t === normalize(c));
+  return commands.some((c) => t === normalize(c));
+}
+
+function isAdminStatusCommand(raw) {
+  return matchesCommand(raw, ADMIN_STATUS_COMMANDS);
+}
+
+function isAdminStatsCommand(raw) {
+  return matchesCommand(raw, ADMIN_STATS_COMMANDS);
+}
+
+function isAdminChatsCommand(raw) {
+  return matchesCommand(raw, ADMIN_CHATS_COMMANDS);
+}
+
+function buildAdminStatsMessage() {
+  const uptimeMin = Math.floor((Date.now() - new Date(botStats.startedAt).getTime()) / 60000);
+  return [
+    '📊 *إحصائيات بوت Yalla*',
+    '',
+    `• مدة التشغيل: ${uptimeMin} دقيقة`,
+    `• رسائل العملاء: ${botStats.inboundMessages}`,
+    `• ردود البوت: ${botStats.botReplies}`,
+    `• ردود AI: ${botStats.aiReplies}`,
+    `• ردود ثابتة: ${botStats.fixedReplies}`,
+    `• طلبات رابط التطبيق: ${botStats.appLinks}`,
+    `• استفسارات الأسعار: ${botStats.pricingRequests}`,
+    `• استفسارات المناطق: ${botStats.areaRequests}`,
+    `• متابعة الطلب: ${botStats.orderStatusRequests}`,
+    `• طلبات الدعم: ${botStats.supportRequests}`,
+    `• حلول الأعطال الشائعة: ${botStats.commonIssueReplies}`,
+    `• التصعيدات للدعم: ${botStats.escalations}`,
+    `• تدخلات بشرية: ${botStats.humanTakeovers}`,
+    `• محادثات تحت التدخل الآن: ${activeTakeoverCount()}`,
+    '',
+    'ℹ️ الإحصائيات تبدأ من آخر تشغيل للخدمة ولا تحفظ محتوى رسائل العملاء.',
+  ].join('\n');
+}
+
+function buildAdminChatsMessage() {
+  const now = Date.now();
+  const active = Object.entries(sessions)
+    .filter(([, session]) => (session.humanTakeoverUntil || 0) > now)
+    .sort((a, b) => a[1].humanTakeoverUntil - b[1].humanTakeoverUntil);
+
+  if (!active.length) return '👤 ما في محادثات تحت التدخل البشري حالياً.';
+
+  const lines = ['👤 *المحادثات تحت التدخل البشري*', ''];
+  for (const [jid, session] of active.slice(0, 20)) {
+    const phone = jid.split('@')[0];
+    const mins = Math.max(1, Math.ceil((session.humanTakeoverUntil - now) / 60000));
+    lines.push(`• ${phone} — باقي تقريباً ${mins} دقيقة${session.escalationReason ? ` — ${session.escalationReason}` : ''}`);
+  }
+  if (active.length > 20) lines.push(`… و${active.length - 20} محادثة إضافية`);
+  return lines.join('\n');
 }
 
 // يبني تقرير حالة المساعد الذكي (يشمل فحصاً حيّاً) لأرقام الإدارة.
@@ -697,6 +844,7 @@ async function buildAdminStatusMessage() {
     `• ذاكرة المحادثة: ${AI_MEMORY_TURNS} دور`,
     `• حد الرسائل: ${AI_RATE_MAX ? `${AI_RATE_MAX} سؤال كل ${AI_RATE_WINDOW_MS / 1000} ثانية` : 'بلا حد'}`,
     `• الاستدعاءات: ${aiStats.totalCalls} — الفاشلة: ${aiStats.failures}`,
+    `• تدخل بشري نشط: ${activeTakeoverCount()} محادثة`,
   ];
   if (aiStats.lastError) {
     lines.push(`• آخر خطأ: ${aiStats.lastError} (${aiStats.lastErrorAt || '?'})`);
@@ -741,15 +889,15 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
   const session = getSession(jid);
   const raw = (text || '').trim();
 
-  // أوامر تشخيص إدارية — تُعالَج قبل كل شيء وتُتاح لأرقام الإدارة فقط.
-  if (isAdminStatusCommand(raw)) {
-    if (isAdmin(phone)) return await buildAdminStatusMessage();
-    console.log(`ℹ️ [تشخيص] أمر حالة من رقم غير مُدرج بالإدارة: "${phone}"`);
-    return (
-      '🔒 هذا الأمر متاح للإدارة فقط.\n\n' +
-      `معرّف رقمك لدى البوت: *${phone}*\n\n` +
-      'إذا كان هذا رقم إدارة، أضِفه إلى ADMIN_NUMBERS ثم أعد تشغيل الخدمة.'
-    );
+  // أوامر الإدارة تُعالَج قبل أي مسار للعميل.
+  if (isAdminStatusCommand(raw) || isAdminStatsCommand(raw) || isAdminChatsCommand(raw)) {
+    if (!isAdmin(phone)) {
+      console.log(`ℹ️ [إدارة] أمر من رقم غير مُدرج بالإدارة: "${phone}"`);
+      return '🔒 هذا الأمر متاح للإدارة فقط.';
+    }
+    if (isAdminStatsCommand(raw)) return buildAdminStatsMessage();
+    if (isAdminChatsCommand(raw)) return buildAdminChatsMessage();
+    return await buildAdminStatusMessage();
   }
 
   // يتيح للعميل بدء سياق جديد بدون الاحتفاظ بذاكرة المساعد السابقة.
@@ -765,32 +913,68 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
   // الأولوية للاستفسارات المحددة قبل كلمة "تطبيق" العامة.
   const isQuestion = looksLikeQuestion(raw);
 
+  if (shouldEscalate(session, raw)) {
+    incrementStat('escalations');
+    activateHumanTakeover(jid, 'smart-escalation');
+    return ESCALATION_MESSAGE;
+  }
+
+  const commonIssue = detectCommonIssue(raw);
+  if (commonIssue) {
+    recordSupportAttempt(session);
+    incrementStat('commonIssueReplies');
+    incrementStat('fixedReplies');
+    return COMMON_ISSUE_MESSAGES[commonIssue];
+  }
+
   const wantsSupport =
     raw === '3' ||
     raw === '٣' ||
     includesAny(raw, SUPPORT_KEYWORDS);
-  if (wantsSupport) return SUPPORT_MESSAGE;
+  if (wantsSupport) {
+    recordSupportAttempt(session);
+    incrementStat('supportRequests');
+    incrementStat('fixedReplies');
+    return SUPPORT_MESSAGE;
+  }
 
   const wantsOrderStatus = includesAny(raw, ORDER_STATUS_KEYWORDS);
-  if (wantsOrderStatus) return ORDER_STATUS_MESSAGE;
+  if (wantsOrderStatus) {
+    incrementStat('orderStatusRequests');
+    incrementStat('fixedReplies');
+    return ORDER_STATUS_MESSAGE;
+  }
 
   const wantsPricing =
     raw === '2' ||
     raw === '٢' ||
     includesAny(raw, PRICING_KEYWORDS);
-  if (wantsPricing) return PRICING_MESSAGE;
+  if (wantsPricing) {
+    incrementStat('pricingRequests');
+    incrementStat('fixedReplies');
+    return PRICING_MESSAGE;
+  }
 
   const wantsAreas = includesAny(raw, AREAS_KEYWORDS);
-  if (wantsAreas) return AREAS_MESSAGE;
+  if (wantsAreas) {
+    incrementStat('areaRequests');
+    incrementStat('fixedReplies');
+    return AREAS_MESSAGE;
+  }
 
   const wantsApp =
     raw === '1' ||
     raw === '١' ||
     includesAny(raw, ['تحميل التطبيق', 'حمل التطبيق', 'رابط التطبيق', 'نزّل التطبيق', 'نزل التطبيق', 'download app']) ||
     (!isQuestion && includesAny(raw, ORDER_KEYWORDS));
-  if (wantsApp) return APP_DOWNLOAD_MESSAGE;
+  if (wantsApp) {
+    incrementStat('appLinks');
+    incrementStat('fixedReplies');
+    return APP_DOWNLOAD_MESSAGE;
+  }
 
   if (!raw || includesAny(raw, GREETING_KEYWORDS)) {
+    incrementStat('fixedReplies');
     return WELCOME_MESSAGE;
   }
 
@@ -812,7 +996,10 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
       );
     }
     const aiReply = await askAI(session, raw);
-    if (aiReply) return aiReply;
+    if (aiReply) {
+      incrementStat('aiReplies');
+      return aiReply;
+    }
   }
 
   if (includesAny(raw, SUPPORT_KEYWORDS)) return SUPPORT_MESSAGE;
@@ -1012,7 +1199,7 @@ async function startBot() {
         // نستثني رسائل البوت نفسه اعتماداً على معرّف الرسالة الناتج عن sendMessage.
         if (msg.key.fromMe) {
           if (!wasSentByBot(msg.key.id)) {
-            activateHumanTakeover(jid);
+            activateHumanTakeover(jid, 'manual-reply');
           }
           continue;
         }
@@ -1028,6 +1215,7 @@ async function startBot() {
         if (!text && !hasMedia) continue;
 
         const phone = jid.split('@')[0];
+        incrementStat('inboundMessages');
 
         await sock.sendPresenceUpdate('composing', jid).catch(() => {});
 
@@ -1038,6 +1226,7 @@ async function startBot() {
           if (!r) continue;
           const sent = await sock.sendMessage(jid, { text: r });
           rememberBotMessage(sent);
+          incrementStat('botReplies');
         }
 
         await sock.sendPresenceUpdate('paused', jid).catch(() => {});
@@ -1064,7 +1253,7 @@ app.get('/', (_req, res) => {
     humanTakeover: {
       enabled: true,
       durationMinutes: Math.round(HUMAN_TAKEOVER_MS / 60000),
-      activeChats: Object.values(sessions).filter((session) => session.humanTakeoverUntil > Date.now()).length,
+      activeChats: activeTakeoverCount(),
     },
     time: new Date().toISOString(),
   });
@@ -1093,6 +1282,7 @@ app.get('/ai-status', async (_req, res) => {
         lastErrorAt: aiStats.lastErrorAt,
       },
       groqLimits: provider === 'groq' ? aiStats.groqLimits : null,
+      bot: { ...botStats, activeTakeovers: activeTakeoverCount() },
       ping,
     });
   } catch (e) {
