@@ -148,7 +148,7 @@ const AI_RATE_MAX = Math.max(0, parseInt(process.env.AI_RATE_MAX || '8', 10) || 
 const AI_RATE_WINDOW_MS = Math.max(1, parseInt(process.env.AI_RATE_WINDOW_SEC || '60', 10) || 60) * 1000;
 const AI_MAX_INPUT_CHARS = Math.max(200, parseInt(process.env.AI_MAX_INPUT_CHARS || '1200', 10) || 1200);
 const AI_SESSION_TTL_MS = Math.max(5, parseInt(process.env.AI_SESSION_TTL_MIN || '60', 10) || 60) * 60 * 1000;
-const HUMAN_TAKEOVER_MS = Math.max(5, parseInt(process.env.HUMAN_TAKEOVER_MIN || '60', 10) || 60) * 60 * 1000;
+const HUMAN_TAKEOVER_MS = Math.max(5, parseInt(process.env.HUMAN_TAKEOVER_MIN || '30', 10) || 30) * 60 * 1000;
 
 // إحصاءات حيّة لحالة المساعد الذكي — تُعرض في أمر التشخيص و/ai-status.
 const aiStats = {
