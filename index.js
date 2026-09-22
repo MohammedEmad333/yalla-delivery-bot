@@ -797,6 +797,7 @@ async function askAI(session, userText) {
 const ADMIN_STATUS_COMMANDS = ['/حالة', '/الحالة', '/status', '/ai', 'حالة المساعد', 'فحص المساعد', 'ai status'];
 const ADMIN_STATS_COMMANDS = ['/stats', '/إحصائيات', '/احصائيات', 'إحصائيات البوت', 'احصائيات البوت'];
 const ADMIN_CHATS_COMMANDS = ['/محادثات', '/chats', 'المحادثات'];
+const ADMIN_RESUME_COMMANDS = ['/بوت', '/bot', '/resume', '/تشغيل', 'رجع البوت', 'رجّع البوت'];
 
 function matchesCommand(raw, commands) {
   const t = normalize(raw);
@@ -813,6 +814,10 @@ function isAdminStatsCommand(raw) {
 
 function isAdminChatsCommand(raw) {
   return matchesCommand(raw, ADMIN_CHATS_COMMANDS);
+}
+
+function isAdminResumeCommand(raw) {
+  return matchesCommand(raw, ADMIN_RESUME_COMMANDS);
 }
 
 function buildAdminStatsMessage() {
@@ -919,10 +924,16 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
   const raw = (text || '').trim();
 
   // أوامر الإدارة تُعالَج قبل أي مسار للعميل.
-  if (isAdminStatusCommand(raw) || isAdminStatsCommand(raw) || isAdminChatsCommand(raw)) {
+  if (isAdminStatusCommand(raw) || isAdminStatsCommand(raw) || isAdminChatsCommand(raw) || isAdminResumeCommand(raw)) {
     if (!isAdmin(phone)) {
       console.log(`ℹ️ [إدارة] أمر من رقم غير مُدرج بالإدارة: "${phone}"`);
       return '🔒 هذا الأمر متاح للإدارة فقط.';
+    }
+    if (isAdminResumeCommand(raw)) {
+      const resumed = resumeBotForChat(jid);
+      return resumed
+        ? '🤖 تم استئناف مساعد Yalla الآلي فوراً لهذه المحادثة.'
+        : '🤖 البوت شغّال بالفعل لهذه المحادثة، وما في تدخل بشري نشط.';
     }
     if (isAdminStatsCommand(raw)) return buildAdminStatsMessage();
     if (isAdminChatsCommand(raw)) return buildAdminChatsMessage();
@@ -1072,11 +1083,9 @@ function extractText(msg) {
 // نميّز رسائل البوت التي أرسلها بنفسه عن الردود اليدوية من واتساب.
 // أي رسالة صادرة من الحساب وليست ضمن هذه المعرّفات تعتبر تدخلاً بشرياً.
 const botSentMessageIds = new Map();
-const RESUME_BOT_COMMANDS = ['/بوت', '/bot', '/resume', '/تشغيل', 'رجع البوت', 'رجّع البوت'];
 
 function isResumeBotCommand(text) {
-  const t = normalize(text);
-  return RESUME_BOT_COMMANDS.some((command) => t === normalize(command));
+  return isAdminResumeCommand(text);
 }
 
 function rememberBotMessage(messageInfo) {
@@ -1224,8 +1233,6 @@ async function startBot() {
   });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
-
     for (const msg of messages) {
       try {
         if (!msg.message) continue;
@@ -1263,6 +1270,9 @@ async function startBot() {
           activateHumanTakeover(jid, 'رد يدوي من فريق الدعم');
           continue;
         }
+
+        // الرسائل الواردة من العملاء تُعالج فقط كـ notify؛ رسائل append غالباً مزامنة تاريخية.
+        if (type !== 'notify') continue;
 
         // أثناء التدخل البشري لا يرسل البوت أو الـAI أي رد للعميل.
         if (isHumanTakeoverActive(jid)) {
