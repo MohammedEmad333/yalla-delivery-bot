@@ -284,10 +284,21 @@ function isHumanTakeoverActive(jid) {
   if (!session?.humanTakeoverUntil) return false;
   if (Date.now() >= session.humanTakeoverUntil) {
     delete session.humanTakeoverUntil;
+    delete session.escalationReason;
     console.log(`🤖 انتهى التدخل البشري لـ ${jid.split('@')[0]} وعاد البوت تلقائياً.`);
     return false;
   }
   return true;
+}
+
+function resumeBotForChat(jid) {
+  const session = getSession(jid);
+  const wasActive = (session.humanTakeoverUntil || 0) > Date.now();
+  delete session.humanTakeoverUntil;
+  delete session.escalationReason;
+  session.aiHistory = [];
+  console.log(`🤖 تم استئناف البوت يدوياً لـ ${jid.split('@')[0]}.`);
+  return wasActive;
 }
 
 // تنظيف الجلسات الخاملة حتى لا تنمو ذاكرة العملية بلا حدود مع مرور الوقت.
@@ -413,9 +424,23 @@ const ESCALATION_KEYWORDS = [
   'لسا المشكلة', 'لسه المشكلة', 'بدي اشتكي', 'بدي أشتكي',
 ];
 
-const ESCALATION_MESSAGE =
-  '👤 *تم تحويل المحادثة لفريق الدعم*\n\n' +
-  `رح يتابع معك أحد أفراد الفريق من نفس المحادثة. خلال المتابعة البشرية، البوت رح يتوقف عن الرد تلقائياً لمدة ${Math.round(HUMAN_TAKEOVER_MS / 60000)} دقيقة.`;
+const ISSUE_LABELS = {
+  login: 'مشكلة تسجيل الدخول',
+  code: 'مشكلة رمز التحقق',
+  app: 'مشكلة في التطبيق',
+  payment: 'مشكلة بالدفع أو المحفظة',
+  order: 'طلب متأخر أو عالق',
+  location: 'مشكلة بالموقع',
+  support: 'طلب دعم',
+};
+
+function buildEscalationMessage(reason) {
+  return (
+    '👤 *تم تحويل المحادثة لفريق الدعم*\n\n' +
+    `سبب التحويل: *${reason || 'طلب دعم'}*\n\n` +
+    `رح يتابع معك أحد أفراد الفريق من نفس المحادثة. خلال المتابعة البشرية، البوت رح يتوقف عن الرد تلقائياً لمدة ${Math.round(HUMAN_TAKEOVER_MS / 60000)} دقيقة.`
+  );
+}
 
 function detectCommonIssue(raw) {
   for (const issue of COMMON_ISSUES) {
@@ -424,11 +449,14 @@ function detectCommonIssue(raw) {
   return null;
 }
 
-function shouldEscalate(session, raw) {
-  if (includesAny(raw, ESCALATION_KEYWORDS)) return true;
+function escalationReason(session, raw) {
+  if (includesAny(raw, ESCALATION_KEYWORDS)) return 'طلب التحدث مع موظف';
   const now = Date.now();
   session.supportAttempts = (session.supportAttempts || []).filter((t) => now - t < 15 * 60 * 1000);
-  return session.supportAttempts.length >= SMART_ESCALATION_REPEAT;
+  if (session.supportAttempts.length >= SMART_ESCALATION_REPEAT) {
+    return session.lastSupportReason || 'تكرار مشكلة الدعم';
+  }
+  return null;
 }
 
 function recordSupportAttempt(session) {
@@ -914,14 +942,16 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
   // الأولوية للاستفسارات المحددة قبل كلمة "تطبيق" العامة.
   const isQuestion = looksLikeQuestion(raw);
 
-  if (shouldEscalate(session, raw)) {
+  const escalation = escalationReason(session, raw);
+  if (escalation) {
     incrementStat('escalations');
-    activateHumanTakeover(jid, 'smart-escalation');
-    return ESCALATION_MESSAGE;
+    activateHumanTakeover(jid, escalation);
+    return buildEscalationMessage(escalation);
   }
 
   const commonIssue = detectCommonIssue(raw);
   if (commonIssue) {
+    session.lastSupportReason = ISSUE_LABELS[commonIssue] || 'مشكلة دعم';
     recordSupportAttempt(session);
     incrementStat('commonIssueReplies');
     incrementStat('fixedReplies');
@@ -933,6 +963,7 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
     raw === '٣' ||
     includesAny(raw, SUPPORT_KEYWORDS);
   if (wantsSupport) {
+    session.lastSupportReason = ISSUE_LABELS.support;
     recordSupportAttempt(session);
     incrementStat('supportRequests');
     incrementStat('fixedReplies');
@@ -1041,6 +1072,12 @@ function extractText(msg) {
 // نميّز رسائل البوت التي أرسلها بنفسه عن الردود اليدوية من واتساب.
 // أي رسالة صادرة من الحساب وليست ضمن هذه المعرّفات تعتبر تدخلاً بشرياً.
 const botSentMessageIds = new Map();
+const RESUME_BOT_COMMANDS = ['/بوت', '/bot', '/resume', '/تشغيل', 'رجع البوت', 'رجّع البوت'];
+
+function isResumeBotCommand(text) {
+  const t = normalize(text);
+  return RESUME_BOT_COMMANDS.some((command) => t === normalize(command));
+}
 
 function rememberBotMessage(messageInfo) {
   const id = messageInfo?.key?.id;
@@ -1199,9 +1236,31 @@ async function startBot() {
         // رد يدوي من صاحب حساب واتساب يوقف البوت لهذا العميل فقط.
         // نستثني رسائل البوت نفسه اعتماداً على معرّف الرسالة الناتج عن sendMessage.
         if (msg.key.fromMe) {
-          if (!wasSentByBot(msg.key.id)) {
-            activateHumanTakeover(jid, 'manual-reply');
+          if (wasSentByBot(msg.key.id)) continue;
+
+          const outgoingText = extractText(msg).trim();
+          if (isResumeBotCommand(outgoingText)) {
+            const resumed = resumeBotForChat(jid);
+
+            // نحاول حذف أمر الإدارة من المحادثة حتى لا يبقى ظاهراً للعميل.
+            try {
+              const deletion = await sock.sendMessage(jid, { delete: msg.key });
+              rememberBotMessage(deletion);
+            } catch (_) {
+              /* الحذف اختياري وقد لا تدعمه كل نسخ واتساب */
+            }
+
+            if (resumed) {
+              const confirmation = await sock.sendMessage(jid, {
+                text: '🤖 تم استئناف مساعد Yalla الآلي. تقدر تكمل استفسارك بشكل طبيعي.',
+              });
+              rememberBotMessage(confirmation);
+              incrementStat('botReplies');
+            }
+            continue;
           }
+
+          activateHumanTakeover(jid, 'رد يدوي من فريق الدعم');
           continue;
         }
 
