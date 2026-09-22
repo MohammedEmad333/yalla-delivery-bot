@@ -47,8 +47,8 @@ const PORT = process.env.PORT || 3000;
 // الجلسة إذا شغّل systemd العملية من دليل عمل مختلف (سبب شائع لطلب ربط جديد).
 const AUTH_FOLDER = path.resolve(__dirname, process.env.AUTH_FOLDER || 'auth_info');
 // روابط تحميل تطبيق يلا ديلفري (عدّلها لروابطك الحقيقية)
-const APP_ANDROID_URL = process.env.APP_ANDROID_URL || 'https://play.google.com/apps/testing/com.mohammedemad333.yalla';
-const APP_WEB_URL = process.env.APP_WEB_URL || 'https://yalla.mohammedelrefy28.workers.dev/';
+const APP_ANDROID_URL = process.env.APP_ANDROID_URL || 'https://play.google.com/store/apps/details?id=com.mohammedemad333.yalla';
+const APP_WEB_URL = process.env.APP_WEB_URL || 'https://app.yalladelivery.org/';
 
 // ===== تسعير التوصيل (مطابق لتطبيق يلا ديلفري — pricing.service.js) =====
 // النموذج الفعلي في الخادم: كل 250 متر = 1 شيكل، المسافة بين حي الاستلام
@@ -221,7 +221,7 @@ function resetSession(jid) {
 const APP_DOWNLOAD_MESSAGE =
   '📲 *اطلب من تطبيق Yalla Delivery*\n\n' +
   'إنشاء الطلبات يتم من التطبيق حتى تقدر تشوف السعر وتتابع حالة طلبك بسهولة.\n\n' +
-  `🤖 أندرويد: ${APP_ANDROID_URL}\n` +
+  `📱 أندرويد: ${APP_ANDROID_URL}\n` +
   `🌐 الويب: ${APP_WEB_URL}`;
 
 const WELCOME_MESSAGE =
