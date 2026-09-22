@@ -417,6 +417,22 @@ function classifyGroqError(status, data) {
   return `خطأ Groq ${status}: ${msg || 'غير معروف'}`;
 }
 
+// fetch مع مهلة زمنية موحّدة لمزوّدي الذكاء الاصطناعي.
+// Node.js 18+ يوفّر fetch و AbortController بشكل مدمج.
+async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // نداء Gemini (generativelanguage REST). يحوّل السجلّ المحايد لصيغة contents.
 // عند 404 على النموذج الأساسي، يُجرَّب النموذج الاحتياطي تلقائياً مرة واحدة.
 async function callGemini({ system, history = [], prompt, temperature = 0.6, maxOutputTokens = 512, timeoutMs = 20000 }) {
@@ -457,7 +473,7 @@ async function callGemini({ system, history = [], prompt, temperature = 0.6, max
       last = { ok: false, status: res.status, text: '', error: classifyGeminiError(res.status, data) };
       if (res.status !== 404) return last; // النموذج الاحتياطي يفيد فقط مع 404
     } catch (err) {
-      return { ok: false, status: 0, text: '', error: `تعذّر الاتصال: ${err?.message || err}` };
+      return { ok: false, status: 0, text: '', error: err?.name === 'AbortError' ? 'انتهت مهلة الاتصال بـ Gemini.' : `تعذّر الاتصال بـ Gemini: ${err?.message || err}` };
     }
   }
   return last;
@@ -502,7 +518,7 @@ async function callGroq({ system, history = [], prompt, temperature = 0.6, maxOu
       last = { ok: false, status: res.status, text: '', error: classifyGroqError(res.status, data) };
       if (res.status !== 404) return last; // النموذج الاحتياطي يفيد فقط مع 404
     } catch (err) {
-      return { ok: false, status: 0, text: '', error: `تعذّر الاتصال بـ Groq: ${err?.message || err}` };
+      return { ok: false, status: 0, text: '', error: err?.name === 'AbortError' ? 'انتهت مهلة الاتصال بـ Groq.' : `تعذّر الاتصال بـ Groq: ${err?.message || err}` };
     }
   }
   return last;
