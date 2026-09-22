@@ -148,6 +148,7 @@ const AI_RATE_MAX = Math.max(0, parseInt(process.env.AI_RATE_MAX || '8', 10) || 
 const AI_RATE_WINDOW_MS = Math.max(1, parseInt(process.env.AI_RATE_WINDOW_SEC || '60', 10) || 60) * 1000;
 const AI_MAX_INPUT_CHARS = Math.max(200, parseInt(process.env.AI_MAX_INPUT_CHARS || '1200', 10) || 1200);
 const AI_SESSION_TTL_MS = Math.max(5, parseInt(process.env.AI_SESSION_TTL_MIN || '60', 10) || 60) * 60 * 1000;
+const HUMAN_TAKEOVER_MS = Math.max(5, parseInt(process.env.HUMAN_TAKEOVER_MIN || '60', 10) || 60) * 60 * 1000;
 
 // إحصاءات حيّة لحالة المساعد الذكي — تُعرض في أمر التشخيص و/ai-status.
 const aiStats = {
@@ -240,6 +241,24 @@ function getSession(jid) {
 
 function resetSession(jid) {
   sessions[jid] = { state: STATES.IDLE, lastSeenAt: Date.now() };
+}
+
+function activateHumanTakeover(jid) {
+  const session = getSession(jid);
+  session.humanTakeoverUntil = Date.now() + HUMAN_TAKEOVER_MS;
+  session.aiHistory = [];
+  console.log(`👤 تدخل بشري مفعّل لـ ${jid.split('@')[0]} لمدة ${Math.round(HUMAN_TAKEOVER_MS / 60000)} دقيقة.`);
+}
+
+function isHumanTakeoverActive(jid) {
+  const session = sessions[jid];
+  if (!session?.humanTakeoverUntil) return false;
+  if (Date.now() >= session.humanTakeoverUntil) {
+    delete session.humanTakeoverUntil;
+    console.log(`🤖 انتهى التدخل البشري لـ ${jid.split('@')[0]} وعاد البوت تلقائياً.`);
+    return false;
+  }
+  return true;
 }
 
 // تنظيف الجلسات الخاملة حتى لا تنمو ذاكرة العملية بلا حدود مع مرور الوقت.
@@ -831,6 +850,32 @@ function extractText(msg) {
 // ==========================================================
 //  اتصال WhatsApp (Baileys)
 // ==========================================================
+// نميّز رسائل البوت التي أرسلها بنفسه عن الردود اليدوية من واتساب.
+// أي رسالة صادرة من الحساب وليست ضمن هذه المعرّفات تعتبر تدخلاً بشرياً.
+const botSentMessageIds = new Map();
+
+function rememberBotMessage(messageInfo) {
+  const id = messageInfo?.key?.id;
+  if (!id) return;
+  botSentMessageIds.set(id, Date.now() + 60_000);
+}
+
+function wasSentByBot(id) {
+  if (!id) return false;
+  const expiresAt = botSentMessageIds.get(id);
+  if (!expiresAt) return false;
+  botSentMessageIds.delete(id);
+  return expiresAt > Date.now();
+}
+
+const botMessageCleanupTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [id, expiresAt] of botSentMessageIds) {
+    if (expiresAt <= now) botSentMessageIds.delete(id);
+  }
+}, 60_000);
+botMessageCleanupTimer.unref?.();
+
 async function startBot() {
   // إغلاق أي اتصال قديم قبل فتح واحد جديد (يمنع الاتصالات المتوازية)
   if (currentSock) {
@@ -958,14 +1003,29 @@ async function startBot() {
 
     for (const msg of messages) {
       try {
-        if (!msg.message || msg.key.fromMe) continue;
+        if (!msg.message) continue;
 
         const jid = msg.key.remoteJid;
         if (!jid || jid.endsWith('@g.us') || jid.endsWith('@broadcast') || jid.endsWith('@newsletter')) continue;
 
+        // رد يدوي من صاحب حساب واتساب يوقف البوت لهذا العميل فقط.
+        // نستثني رسائل البوت نفسه اعتماداً على معرّف الرسالة الناتج عن sendMessage.
+        if (msg.key.fromMe) {
+          if (!wasSentByBot(msg.key.id)) {
+            activateHumanTakeover(jid);
+          }
+          continue;
+        }
+
+        // أثناء التدخل البشري لا يرسل البوت أو الـAI أي رد للعميل.
+        if (isHumanTakeoverActive(jid)) {
+          console.log(`👤 تجاهل رد آلي لـ ${jid.split('@')[0]} — المحادثة تحت التدخل البشري.`);
+          continue;
+        }
+
         const text = extractText(msg);
         const hasMedia = hasMediaMessage(msg);
-        if (!text && !hasMedia) continue; // نتعامل مع النص والصور (إشعار الحوالة)
+        if (!text && !hasMedia) continue;
 
         const phone = jid.split('@')[0];
 
@@ -975,7 +1035,9 @@ async function startBot() {
 
         const replies = Array.isArray(reply) ? reply : [reply];
         for (const r of replies) {
-          if (r) await sock.sendMessage(jid, { text: r });
+          if (!r) continue;
+          const sent = await sock.sendMessage(jid, { text: r });
+          rememberBotMessage(sent);
         }
 
         await sock.sendPresenceUpdate('paused', jid).catch(() => {});
@@ -999,6 +1061,11 @@ app.get('/', (_req, res) => {
     service: 'Yalla Delivery WhatsApp Bot 🛵',
     status: connectionStatus,
     ai: { enabled: AI_ENABLED, provider: activeProvider(), model: activeProvider() ? activeModelLabel(activeProvider()) : null },
+    humanTakeover: {
+      enabled: true,
+      durationMinutes: Math.round(HUMAN_TAKEOVER_MS / 60000),
+      activeChats: Object.values(sessions).filter((session) => session.humanTakeoverUntil > Date.now()).length,
+    },
     time: new Date().toISOString(),
   });
 });
