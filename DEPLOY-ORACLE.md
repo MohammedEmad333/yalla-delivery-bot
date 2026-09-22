@@ -111,7 +111,7 @@ USE_PAIRING_CODE=true
 BUSINESS_NUMBER=970593456405     # رقم واتساب الأعمال (دولي بلا +)
 SUPPORT_NUMBER=+970593456405
 APP_ANDROID_URL=<رابط أندرويد الحقيقي>
-APP_WEB_URL=https://yalla.mohammedelrefy28.workers.dev/
+APP_WEB_URL=https://app.yalladelivery.org/
 LOG_LEVEL=warn
 ```
 احفظ بـ `Ctrl+O` ثم `Enter`، واخرج بـ `Ctrl+X`.
