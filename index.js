@@ -320,7 +320,13 @@ const SUPPORT_MESSAGE =
   'عندك استفسار أو مشكلة؟ فريقنا جاهز يساعدك.\n' +
   `📞 واتساب / اتصال: ${SUPPORT_NUMBER}\n` +
   '🕘 يومياً من 9 صباحاً حتى 11 مساءً.\n\n' +
-  'ولإنشاء طلب جديد استخدم تطبيق Yalla Delivery 📲.';
+  'اكتب مشكلتك باختصار، وإذا احتاجت متابعة مباشرة تواصل مع الدعم على الرقم بالأعلى.';
+
+const ORDER_STATUS_MESSAGE =
+  '📦 *متابعة حالة الطلب*\n\n' +
+  'ما بقدر أشوف حالة طلبك أو بيانات حسابك مباشرة من واتساب.\n' +
+  'لمتابعة الطلب افتح تطبيق Yalla Delivery وشوف حالة الطلب من داخل التطبيق.\n\n' +
+  `🌐 تطبيق الويب: ${APP_WEB_URL}`;
 
 const GREETING_KEYWORDS = [
   'مرحبا', 'مرحباً', 'السلام عليكم', 'اهلا', 'أهلا', 'هلا',
@@ -332,7 +338,8 @@ const ORDER_KEYWORDS = [
 ];
 const PRICING_KEYWORDS = ['اسعار', 'أسعار', 'سعر', 'تكلفة', 'تكلفه', 'اجرة', 'أجرة'];
 const AREAS_KEYWORDS = ['مناطق', 'المنطقة', 'منطقة', 'تغطية', 'التغطية'];
-const SUPPORT_KEYWORDS = ['دعم', 'مساعدة', 'مساعده', 'تواصل', 'رقم الدعم', 'شكوى', 'شكوي', 'support'];
+const SUPPORT_KEYWORDS = ['دعم', 'مساعدة', 'مساعده', 'تواصل', 'رقم الدعم', 'شكوى', 'شكوي', 'مشكلة', 'مشكلتي', 'ما بشتغل', 'مش شغال', 'لا يعمل', 'support'];
+const ORDER_STATUS_KEYWORDS = ['حالة طلبي', 'حالة الطلب', 'وين طلبي', 'أين طلبي', 'اين طلبي', 'متابعة الطلب', 'تتبع الطلب', 'تتبّع الطلب'];
 const RESET_KEYWORDS = ['/reset', 'reset', 'مسح المحادثة', 'امسح المحادثة', 'ابدأ من جديد', 'ابدا من جديد', 'بداية جديدة'];
 const QUESTION_WORDS = [
   'كم', 'بكم', 'كيف', 'وين', 'فين', 'اين', 'أين', 'متى', 'امتى',
@@ -736,14 +743,17 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
     return `✍️ رسالتك طويلة شوي. اختصرها لأقل من ${AI_MAX_INPUT_CHARS} حرف حتى أقدر أساعدك بدقة.`;
   }
 
-  // أي طلب صريح أو اختيار رقم 1 يفتح مسار التطبيق فقط.
+  // الأولوية للاستفسارات المحددة قبل كلمة "تطبيق" العامة.
   const isQuestion = looksLikeQuestion(raw);
-  const wantsApp =
-    raw === '1' ||
-    raw === '١' ||
-    includesAny(raw, ['تطبيق', 'التطبيق', 'تحميل', 'حمل', 'app', 'download', 'رابط']) ||
-    (!isQuestion && includesAny(raw, ORDER_KEYWORDS));
-  if (wantsApp) return APP_DOWNLOAD_MESSAGE;
+
+  const wantsSupport =
+    raw === '3' ||
+    raw === '٣' ||
+    includesAny(raw, SUPPORT_KEYWORDS);
+  if (wantsSupport) return SUPPORT_MESSAGE;
+
+  const wantsOrderStatus = includesAny(raw, ORDER_STATUS_KEYWORDS);
+  if (wantsOrderStatus) return ORDER_STATUS_MESSAGE;
 
   const wantsPricing =
     raw === '2' ||
@@ -754,11 +764,12 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
   const wantsAreas = includesAny(raw, AREAS_KEYWORDS);
   if (wantsAreas) return AREAS_MESSAGE;
 
-  const wantsSupport =
-    raw === '3' ||
-    raw === '٣' ||
-    (!isQuestion && includesAny(raw, SUPPORT_KEYWORDS));
-  if (wantsSupport) return SUPPORT_MESSAGE;
+  const wantsApp =
+    raw === '1' ||
+    raw === '١' ||
+    includesAny(raw, ['تحميل التطبيق', 'حمل التطبيق', 'رابط التطبيق', 'نزّل التطبيق', 'نزل التطبيق', 'download app']) ||
+    (!isQuestion && includesAny(raw, ORDER_KEYWORDS));
+  if (wantsApp) return APP_DOWNLOAD_MESSAGE;
 
   if (!raw || includesAny(raw, GREETING_KEYWORDS)) {
     return WELCOME_MESSAGE;
@@ -785,9 +796,10 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
     if (aiReply) return aiReply;
   }
 
+  if (includesAny(raw, SUPPORT_KEYWORDS)) return SUPPORT_MESSAGE;
+  if (includesAny(raw, ORDER_STATUS_KEYWORDS)) return ORDER_STATUS_MESSAGE;
   if (includesAny(raw, PRICING_KEYWORDS)) return PRICING_MESSAGE;
   if (includesAny(raw, AREAS_KEYWORDS)) return AREAS_MESSAGE;
-  if (includesAny(raw, SUPPORT_KEYWORDS)) return SUPPORT_MESSAGE;
   if (includesAny(raw, ORDER_KEYWORDS)) return APP_DOWNLOAD_MESSAGE;
   return AI_ENABLED && activeProvider() ? AI_TEMPORARY_FALLBACK : WELCOME_MESSAGE;
 }
