@@ -232,6 +232,7 @@ const WELCOME_MESSAGE =
   '1️⃣ اطلب من التطبيق 📲\n' +
   '2️⃣ الأسعار والمناطق 💰📍\n' +
   '3️⃣ الدعم والتواصل 💬\n\n' +
+  'اكتب 1 أو ١، 2 أو ٢، 3 أو ٣.\n\n' +
   'وممكن تكتب سؤالك مباشرة بأي وقت.';
 
 const PRICING_MESSAGE =
@@ -634,16 +635,21 @@ async function handleMessage(jid, phone, text, hasMedia = false) {
   const isQuestion = looksLikeQuestion(raw);
   const wantsApp =
     raw === '1' ||
+    raw === '١' ||
     includesAny(raw, ['تطبيق', 'التطبيق', 'تحميل', 'حمل', 'app', 'download', 'رابط']) ||
     (!isQuestion && includesAny(raw, ORDER_KEYWORDS));
   if (wantsApp) return APP_DOWNLOAD_MESSAGE;
 
   const wantsPricing =
-    raw === '2' || (!isQuestion && includesAny(raw, PRICING_KEYWORDS));
+    raw === '2' ||
+    raw === '٢' ||
+    (!isQuestion && includesAny(raw, PRICING_KEYWORDS));
   if (wantsPricing) return PRICING_MESSAGE;
 
   const wantsSupport =
-    raw === '3' || (!isQuestion && includesAny(raw, SUPPORT_KEYWORDS));
+    raw === '3' ||
+    raw === '٣' ||
+    (!isQuestion && includesAny(raw, SUPPORT_KEYWORDS));
   if (wantsSupport) return SUPPORT_MESSAGE;
 
   if (!raw || includesAny(raw, GREETING_KEYWORDS)) {
