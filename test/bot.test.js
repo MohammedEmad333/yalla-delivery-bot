@@ -46,7 +46,7 @@ test('admin commands reject non-admin callers', async () => {
   const jid = '970500000003@s.whatsapp.net';
   resetSession(jid);
   const reply = await handleMessage(jid, '970500000003', '/stats');
-  assert.match(reply, /الإدارة فقط/);
+  assert.equal(reply, '🔒 هذا الأمر متاح للإدارة فقط.');
 });
 
 test('human takeover can be activated and resumed deterministically', () => {
