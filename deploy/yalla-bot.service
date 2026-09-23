@@ -18,6 +18,21 @@ ExecStart=/usr/bin/node index.js
 # إعادة التشغيل تلقائياً عند أي توقّف أو انهيار أو نفاد الذاكرة
 Restart=always
 RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+# تقوية الخدمة بدون منع كتابة جلسة واتساب.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
+ReadWritePaths=/home/ubuntu/yalla-delivery-bot/auth_info
+
 # سجلّات موحّدة عبر journalctl
 StandardOutput=journal
 StandardError=journal
