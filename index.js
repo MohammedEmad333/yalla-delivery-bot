@@ -14,11 +14,12 @@
  *  - لا يجمع بيانات الطلب ولا يحفظ طلبات محلياً
  */
 
-const express = require('express');
 const qrcodeTerminal = require('qrcode-terminal');
 const pino = require('pino');
 const fs = require('fs');
 const path = require('path');
+const { buildAdminNumbers, isAdminPhone, redactSensitiveText } = require('./src/security');
+const { createHttpApp } = require('./src/http');
 const {
   default: makeWASocket,
   useMultiFileAuthState,
@@ -354,23 +355,15 @@ const SUPPORT_NUMBER = process.env.SUPPORT_NUMBER || '+970593456405';
 const ADMIN_HTTP_TOKEN = String(process.env.ADMIN_HTTP_TOKEN || '').trim();
 
 
-// أرقام الإدارة: تُميَّز لعرض أوامر التشخيص (مثل "/حالة") التي لا يراها العملاء.
-const ADMIN_NUMBERS = Array.from(
-  new Set(
-    [
-      ...(process.env.ADMIN_NUMBERS || '').split(','),
-      BUSINESS_NUMBER,
-      SUPPORT_NUMBER,
-    ]
-      .map((value) => (value || '').replace(/\D/g, ''))
-      .filter((value) => value.length >= 8),
-  ),
-);
+// أرقام الإدارة: مطابقة دولية كاملة فقط.
+const ADMIN_NUMBERS = buildAdminNumbers({
+  adminNumbers: process.env.ADMIN_NUMBERS,
+  businessNumber: BUSINESS_NUMBER,
+  supportNumber: SUPPORT_NUMBER,
+});
 
 function isAdmin(phone) {
-  const normalizedPhone = (phone || '').replace(/\D/g, '');
-  if (!normalizedPhone) return false;
-  return ADMIN_NUMBERS.includes(normalizedPhone);
+  return isAdminPhone(phone, ADMIN_NUMBERS);
 }
 
 const SUPPORT_MESSAGE =
@@ -755,17 +748,6 @@ function isAIRateLimited(session) {
   if (session.aiCallTimes.length >= AI_RATE_MAX) return true;
   session.aiCallTimes.push(now);
   return false;
-}
-
-// حذف بيانات حساسة شائعة قبل إرسال النص إلى مزوّد AI.
-function redactSensitiveText(value) {
-  let text = String(value || '');
-  text = text.replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[REDACTED_EMAIL]');
-  text = text.replace(/\b(?:\+?\d[\d\s-]{7,}\d)\b/g, '[REDACTED_PHONE_OR_NUMBER]');
-  if (/(?:otp|رمز|كود|تحقق)/i.test(text)) {
-    text = text.replace(/\b\d{4,8}\b/g, '[REDACTED_CODE]');
-  }
-  return text;
 }
 
 // استدعاء المساعد والحصول على ردّ نصي. يرجّع null عند أي فشل ليعود البوت
@@ -1335,93 +1317,21 @@ async function startBot() {
 // ==========================================================
 //  سيرفر Express (Keep-Alive + عرض QR + حالة المساعد)
 // ==========================================================
-const app = express();
-app.disable('x-powered-by');
-app.use(express.json({ limit: '32kb' }));
-
-function adminHttpAuth(req, res, next) {
-  if (!ADMIN_HTTP_TOKEN) {
-    return res.status(503).json({ error: 'Admin HTTP endpoints are disabled until ADMIN_HTTP_TOKEN is configured.' });
-  }
-  const bearer = String(req.get('authorization') || '').replace(/^Bearer\s+/i, '').trim();
-  const headerToken = String(req.get('x-admin-token') || '').trim();
-  if (bearer !== ADMIN_HTTP_TOKEN && headerToken !== ADMIN_HTTP_TOKEN) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-  return next();
-}
-
-app.get('/', (_req, res) => {
-  res.json({
-    service: 'Yalla Delivery WhatsApp Bot 🛵',
-    status: connectionStatus,
-    ai: { enabled: AI_ENABLED, provider: activeProvider(), model: activeProvider() ? activeModelLabel(activeProvider()) : null },
-    humanTakeover: {
-      enabled: true,
-      durationMinutes: Math.round(HUMAN_TAKEOVER_MS / 60000),
-      activeChats: activeTakeoverCount(),
-    },
-    time: new Date().toISOString(),
-  });
-});
-
-app.get('/health', (_req, res) => res.status(200).send('OK'));
-
-// حالة المساعد الذكي (تشخيص) — يشمل فحصاً حيّاً لخادم Gemini.
-app.get('/ai-status', adminHttpAuth, async (req, res) => {
-  try {
-    const provider = activeProvider();
-    const live = req.query.live === '1' || req.query.live === 'true';
-    const ping = live ? await pingAI() : {
-      ok: aiStats.lastOkAt != null,
-      cached: true,
-      reason: aiStats.lastError || null,
-      lastOkAt: aiStats.lastOkAt,
-    };
-    res.json({
-      enabled: AI_ENABLED,
-      provider,
-      geminiKeyConfigured: !!GEMINI_API_KEY,
-      groqKeyConfigured: !!GROQ_API_KEY,
-      model: provider ? activeModelLabel(provider) : null,
-      memoryTurns: AI_MEMORY_TURNS,
-      rateLimit: AI_RATE_MAX ? { max: AI_RATE_MAX, windowSec: AI_RATE_WINDOW_MS / 1000 } : null,
-      stats: {
-        totalCalls: aiStats.totalCalls,
-        failures: aiStats.failures,
-        lastOkAt: aiStats.lastOkAt,
-        lastError: aiStats.lastError,
-        lastErrorAt: aiStats.lastErrorAt,
-      },
-      groqLimits: provider === 'groq' ? aiStats.groqLimits : null,
-      bot: { ...botStats, activeTakeovers: activeTakeoverCount() },
-      ping,
-    });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.get('/qr', adminHttpAuth, async (_req, res) => {
-  if (connectionStatus === 'connected') {
-    return res.send('<h2 style="font-family:sans-serif">✅ البوت متصل بالفعل بواتساب.</h2>');
-  }
-  if (!latestQR) {
-    return res.send('<h2 style="font-family:sans-serif">⏳ لا يوجد QR حالياً. حدّث الصفحة بعد لحظات...</h2>');
-  }
-  qrcodeTerminal.generate(latestQR, { small: true }, (qrText) => {
-    const escaped = String(qrText)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
-    res.send(
-      `<div style="font-family:monospace;padding:20px;direction:ltr">
-        <h2 style="font-family:sans-serif">📱 امسح QR من واتساب</h2>
-        <pre style="font-size:10px;line-height:10px;white-space:pre">${escaped}</pre>
-        <p style="font-family:sans-serif">الأجهزة المرتبطة ← ربط جهاز</p>
-      </div>`
-    );
-  });
+const app = createHttpApp({
+  adminHttpToken: ADMIN_HTTP_TOKEN,
+  getConnectionStatus: () => connectionStatus,
+  getLatestQR: () => latestQR,
+  aiEnabled: AI_ENABLED,
+  activeProvider,
+  activeModelLabel,
+  humanTakeoverMinutes: Math.round(HUMAN_TAKEOVER_MS / 60000),
+  activeTakeoverCount,
+  pingAI,
+  aiMemoryTurns: AI_MEMORY_TURNS,
+  aiRateMax: AI_RATE_MAX,
+  aiRateWindowMs: AI_RATE_WINDOW_MS,
+  aiStats,
+  botStats,
 });
 
 const HOST = process.env.HOST || '0.0.0.0';

@@ -100,3 +100,10 @@ cp .env.example .env
 - `/qr` و`/ai-status` غير متاحين بدون `ADMIN_HTTP_TOKEN`.
 - نصوص المستخدم تُنقح من أرقام/بريد/رموز تحقق شائعة قبل إرسالها لمزوّد AI.
 - تحديثات Dependabot الأسبوعية مقصورة افتراضياً على patch/minor.
+
+## بنية الكود
+
+- `index.js` — تشغيل WhatsApp وتوجيه المحادثات.
+- `src/security.js` — مطابقة أرقام الإدارة، حماية HTTP، وتنقيح البيانات الحساسة قبل AI.
+- `src/http.js` — Express health/admin endpoints وQR المحلي.
+- `test/bot.test.js` — اختبارات السلوك والأمان.
