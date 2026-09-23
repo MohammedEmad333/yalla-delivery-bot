@@ -58,17 +58,17 @@ ssh -i ~/Downloads/ssh-key-*.key opc@<PUBLIC_IP>       # Oracle Linux
 **على Ubuntu:**
 ```bash
 sudo apt update && sudo apt -y upgrade
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt -y install nodejs git
-node -v && npm -v      # تأكّد أن الإصدار ≥ 18
+node -v && npm -v      # تأكّد أن الإصدار ≥ 22
 ```
 
 **على Oracle Linux 9:**
 ```bash
 sudo dnf -y update
-curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
+curl -fsSL https://rpm.nodesource.com/setup_22.x | sudo bash -
 sudo dnf install -y nodejs git
-node -v && npm -v      # تأكّد أن الإصدار ≥ 18
+node -v && npm -v      # تأكّد أن الإصدار ≥ 22
 ```
 
 ---
@@ -94,7 +94,7 @@ free -h        # تأكّد أن Swap أصبح 2.0Gi
 cd ~
 git clone https://github.com/MohammedEmad333/yalla-delivery-bot.git
 cd yalla-delivery-bot
-npm install --omit=dev
+npm ci --omit=dev
 ```
 
 ---
@@ -113,6 +113,7 @@ SUPPORT_NUMBER=+970593456405
 APP_ANDROID_URL=<رابط أندرويد الحقيقي>
 APP_WEB_URL=https://app.yalladelivery.org/
 LOG_LEVEL=warn
+ADMIN_HTTP_TOKEN=<قيمة-عشوائية-طويلة-32-محرف-على-الأقل>
 ```
 احفظ بـ `Ctrl+O` ثم `Enter`، واخرج بـ `Ctrl+X`.
 
@@ -169,7 +170,7 @@ curl -s http://localhost:3000/health
 ```bash
 cd ~/yalla-delivery-bot
 git pull
-npm install --omit=dev
+npm ci --omit=dev
 # لتحديث Baileys إلى أحدث إصدار عند الحاجة:
 npm install @whiskeysockets/baileys@latest
 sudo systemctl restart yalla-bot
@@ -193,7 +194,15 @@ sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 3000 -j ACCEPT
 sudo netfilter-persistent save
 ```
 ثم افتح `http://<PUBLIC_IP>:3000/`.
-> للإنتاج يُفضّل عدم كشف المنفذ مباشرةً، أو وضعه خلف Nginx مع شهادة HTTPS.
+> للإنتاج يُفضّل **عدم كشف المنفذ 3000 للإنترنت**. المساران `/qr` و`/ai-status`
+> محميان بـ `ADMIN_HTTP_TOKEN`، لكن الأفضل إبقاؤهما محليين والوصول عبر SSH tunnel أو Reverse Proxy مع HTTPS.
+
+مثال فحص محمي من نفس الخادم:
+```bash
+curl -H "Authorization: Bearer $ADMIN_HTTP_TOKEN" http://127.0.0.1:3000/ai-status
+# الفحص الحي المقصود فقط:
+curl -H "Authorization: Bearer $ADMIN_HTTP_TOKEN" "http://127.0.0.1:3000/ai-status?live=1"
+```
 
 ---
 
